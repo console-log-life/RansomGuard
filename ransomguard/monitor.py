@@ -35,6 +35,8 @@ from . import baseline as baseline_mod
 from . import canary as canary_mod
 from . import config, entropy
 from .logger import EventLogger
+from .process_monitor import ProcessMonitor
+from .responder import Responder
 from .scorer import Reason, Scorer, evaluate_signals
 
 # In phase 3 every event is attributed to this one actor (no PID attribution yet).
@@ -54,8 +56,17 @@ class RansomGuardMonitor:
         self.root = config.ensure_inside(root or config.PROTECTED_DIR)
         self.logger = logger or EventLogger()
         self.scorer = scorer or Scorer()
-        # enforce=False in phase 3 (log only). Phases 4/5 flip this on to kill + recover.
+        # enforce=False in phase 3 (log only). Phase 4 flips this on to suspend + kill;
+        # phase 5 adds recovery between the suspend and the kill.
         self.enforce = enforce
+
+        # Process attribution + response are only wired up when enforcing, so the
+        # log-only mode stays dependency-free and side-effect-free.
+        self.proc_monitor: ProcessMonitor | None = ProcessMonitor(config.SANDBOX) if enforce else None
+        self.responder: Responder | None = (
+            Responder(self.logger, self.proc_monitor) if enforce else None
+        )
+        self._handled = False  # we act once per attack, then keep logging
 
         self.baseline: dict[str, baseline_mod.BaselineEntry] = {}
         self.canaries: dict[str, str] = {}
@@ -71,6 +82,8 @@ class RansomGuardMonitor:
         else:
             self.canaries = canary_mod.load_canaries()
             self.baseline = baseline_mod.load_baseline()
+        if self.proc_monitor is not None:
+            self.proc_monitor.start()  # begin sampling write rates before any attack
         self.logger.log(
             "startup",
             path=str(self.root),
@@ -144,13 +157,59 @@ class RansomGuardMonitor:
         return record
 
     def _on_alert(self, reasons: list[Reason], score: float) -> None:
-        """Threshold crossed. Phase 3: log only. Phases 4/5 override/extend this."""
+        """
+        Threshold crossed. In log-only mode (phase 3) we just record it. When enforcing
+        (phase 4) we attribute the activity to a process and stop it. Phase 5 inserts
+        recovery between the suspend and the kill.
+        """
         self.logger.log(
             "ALERT",
             actor=GLOBAL_ACTOR,
             score=round(score, 1),
             reasons=[f"{r.code}(+{r.points})" for r in reasons],
-            action="log-only (enforcement arrives in phase 4)",
+            action="enforce" if self.enforce else "log-only",
+        )
+        if not self.enforce or self._handled:
+            return
+        self._handled = True
+        self._enforce()
+
+    def _resolve_culprit(self, timeout: float = 2.0, poll: float = 0.2):
+        """
+        Ask the process monitor who to stop, retrying briefly.
+
+        The first canary hit can trip the alert before the sampler has a full write-rate
+        sample, so most_likely_suspect() may be None for a moment. Because the simulator
+        keeps writing, a short poll reliably surfaces it as the top sandbox writer. This
+        retry is the practical answer to the PID-attribution race described in the README.
+        """
+        assert self.proc_monitor is not None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            suspect = self.proc_monitor.most_likely_suspect()
+            if suspect is not None:
+                return suspect
+            time.sleep(poll)
+        return None
+
+    def _enforce(self) -> None:
+        """Suspend and kill the attributed process (phase 5 will recover in between)."""
+        assert self.responder is not None
+        suspect = self._resolve_culprit()
+        if suspect is None:
+            self.logger.log(
+                "enforce_unattributed",
+                note="score crossed threshold but no process could be attributed",
+            )
+            return
+        self.logger.log(
+            "culprit", pid=suspect.pid, name=suspect.name,
+            write_rate=int(suspect.write_rate),
+        )
+        resp = self.responder.respond(suspect.pid, kill_now=True)
+        self.logger.log(
+            "response_done", pid=resp.pid, name=resp.name,
+            suspended=resp.suspended, killed=resp.killed, refused=resp.refused,
         )
 
     # --------------------------------------------------------------- watchdog
@@ -166,6 +225,8 @@ class RansomGuardMonitor:
             self._observer.stop()
             self._observer.join(timeout=5)
             self._observer = None
+        if self.proc_monitor is not None:
+            self.proc_monitor.stop()
         self.logger.log("shutdown", actor=GLOBAL_ACTOR, score=round(self.scorer.score_of(GLOBAL_ACTOR), 1))
 
 
@@ -193,8 +254,13 @@ class _WatchdogBridge(FileSystemEventHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="RansomGuard live monitor (phase 3: log-only).")
+    parser = argparse.ArgumentParser(description="RansomGuard live monitor.")
     parser.add_argument("--path", default=str(config.PROTECTED_DIR), help="folder to watch")
+    parser.add_argument(
+        "--enforce",
+        action="store_true",
+        help="suspend and kill the attributed process on alert (default: log only)",
+    )
     parser.add_argument(
         "--no-rebuild",
         action="store_true",
@@ -214,10 +280,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"not a folder: {root} (run tools/make_test_files.py first)")
         return 1
 
-    monitor = RansomGuardMonitor(root=root, enforce=False)
+    monitor = RansomGuardMonitor(root=root, enforce=args.enforce)
     monitor.prepare(rebuild=not args.no_rebuild)
     monitor.start()
-    print(f"[monitor] watching {root} (log-only). Ctrl-C to stop.")
+    mode = "ENFORCING (will suspend+kill)" if args.enforce else "log-only"
+    print(f"[monitor] watching {root} ({mode}). Ctrl-C to stop.")
 
     try:
         if args.duration > 0:
