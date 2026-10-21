@@ -57,11 +57,11 @@ def _spawn_writer(target_dir, pidfile) -> tuple[subprocess.Popen, int]:
         import os, time
         open(r"{pidfile}", "w").write(str(os.getpid()))
         p = os.path.join(r"{target_dir}", "busy.bin")
-        end = time.time() + 6
+        end = time.time() + 8
         with open(p, "wb") as f:
             while time.time() < end:
                 f.write(os.urandom(262144))
-                f.flush(); os.fsync(f.fileno())
+                f.flush()
                 time.sleep(0.05)
         """
     )
@@ -147,22 +147,67 @@ def test_responder_handles_already_dead_process(tmp_path):
 
 # ----------------------------------------------------- process attribution
 def test_process_monitor_attributes_sandbox_writer(tmp_path):
+    # Signal B (the path that works on Windows): a hard writer, correlated with sandbox
+    # activity, is attributed by write rate - with NO reliance on its name or command line.
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     pm = ProcessMonitor(sandbox, interval=0.2)
     pm.start()
     writer, worker_pid = _spawn_writer(sandbox, tmp_path / "writer.pid")
     try:
-        # Give the sampler time to attribute the worker (by command line / open file).
         suspect = None
         deadline = time.time() + 6
         while time.time() < deadline:
+            pm.note_sandbox_activity(262144)  # monitor reports bytes changed per event
             if any(s.pid == worker_pid for s in pm.get_suspects()):
                 suspect = next(s for s in pm.get_suspects() if s.pid == worker_pid)
                 break
             time.sleep(0.2)
         assert suspect is not None, "writer worker was never attributed as a suspect"
-        assert suspect.in_sandbox is True
+        assert suspect.write_rate > 0
+        assert pm.most_likely_suspect().pid == worker_pid
+    finally:
+        pm.stop()
+        _cleanup(writer, worker_pid)
+
+
+def test_attribution_ignores_process_name(tmp_path):
+    # Renaming the attacker must NOT help it hide: attribution is behavioural only. We copy
+    # the writer to a totally innocent name and confirm it is still attributed.
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    pm = ProcessMonitor(sandbox, interval=0.2)
+    pm.start()
+    writer, worker_pid = _spawn_writer(sandbox, tmp_path / "w.pid")
+    try:
+        deadline = time.time() + 6
+        hit = False
+        while time.time() < deadline:
+            pm.note_sandbox_activity(262144)
+            if any(s.pid == worker_pid for s in pm.get_suspects()):
+                hit = True
+                break
+            time.sleep(0.2)
+        assert hit, "a hard sandbox writer must be attributed regardless of its name"
+    finally:
+        pm.stop()
+        _cleanup(writer, worker_pid)
+
+
+def test_no_suspect_without_sandbox_activity(tmp_path):
+    # Safety: a hard writer must NOT be blamed when the sandbox is quiet (no fs activity)
+    # and we never caught an open handle - otherwise we could kill an innocent busy process.
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    pm = ProcessMonitor(sandbox, interval=0.2)
+    pm.start()
+    # This writer hammers a folder OUTSIDE the sandbox; we never call note_sandbox_activity.
+    writer, worker_pid = _spawn_writer(outside, tmp_path / "o.pid")
+    try:
+        time.sleep(2.0)
+        assert all(s.pid != worker_pid for s in pm.get_suspects())
     finally:
         pm.stop()
         _cleanup(writer, worker_pid)

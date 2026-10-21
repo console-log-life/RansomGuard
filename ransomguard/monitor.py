@@ -76,6 +76,7 @@ class RansomGuardMonitor:
         self._observer: Observer | None = None
         self._refresh_thread: threading.Thread | None = None
         self._stop_refresh = threading.Event()
+        self._enforce_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------ setup
     def prepare(self, rebuild: bool = True) -> None:
@@ -158,6 +159,12 @@ class RansomGuardMonitor:
             except OSError:
                 current = None
 
+        # Tell the process monitor the sandbox just changed AND by how many bytes, so it can
+        # match that volume to whichever process actually wrote it (behaviour-based
+        # attribution - no reliance on the process name or command line).
+        if self.proc_monitor is not None:
+            self.proc_monitor.note_sandbox_activity(current.size if current else 0)
+
         key = str(observed.resolve())
         base = self.baseline.get(key) or self.baseline.get(str(Path(src).resolve()))
 
@@ -199,9 +206,15 @@ class RansomGuardMonitor:
             return
         self._handled = True
         self._alert_active = True  # freeze backup refresh for the duration of the response
-        self._enforce()
+        # Run enforcement on its own thread so the watchdog callback returns immediately.
+        # This is essential: if we blocked here, no further sandbox events would be observed
+        # while we poll for the culprit, and the write-volume attribution would never see
+        # enough sandbox activity to match a process. Letting events keep flowing lets the
+        # volume accumulate so the real attacker is identified.
+        self._enforce_thread = threading.Thread(target=self._enforce, name="enforce", daemon=True)
+        self._enforce_thread.start()
 
-    def _resolve_culprit(self, timeout: float = 2.0, poll: float = 0.2):
+    def _resolve_culprit(self, timeout: float = config.ATTRIB_TIMEOUT_SEC, poll: float = 0.2):
         """
         Ask the process monitor who to stop, retrying briefly.
 
@@ -280,6 +293,10 @@ class RansomGuardMonitor:
             self._observer.stop()
             self._observer.join(timeout=5)
             self._observer = None
+        # Let an in-flight response finish (suspend -> recover -> kill) before we tear down.
+        if self._enforce_thread is not None:
+            self._enforce_thread.join(timeout=15)
+            self._enforce_thread = None
         if self.proc_monitor is not None:
             self.proc_monitor.stop()
         self._stop_refresh.set()

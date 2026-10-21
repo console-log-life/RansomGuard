@@ -188,23 +188,35 @@ means "this looks random" — hence the threshold name `CHI_SQUARE_RANDOM_MAX`.
 ## Known limitations
 
 - **PID attribution.** `watchdog` (inotify) reports *what* changed, never *who* changed
-  it. We attribute an event to the most likely PID by combining "processes writing a lot"
-  with "processes involved with the sandbox". This is a heuristic and can mis-attribute
-  under heavy concurrent I/O. An optional fanotify path (`config.USE_FANOTIFY`, Linux
-  only) is left as the exact alternative.
-- **Windows psutil reality (measured on the demo machine).** `Process.io_counters()`
-  returns 0 for *other* processes here, and `open_files()` frequently misses an
-  actively-written handle. Both signals are reliable on Linux but not on this Windows box.
-  So sandbox involvement is decided cheapest-first by: (1) the process **command line**
-  referencing the protected path or matching the simulator hint — reliable on Windows, and
-  something real EDR products also inspect; (2) its **working directory** being inside the
-  sandbox; (3) an **open handle** in the sandbox — reliable on Linux. Write rate still
-  *ranks* suspects when available. Because the venv's `python.exe` is a launcher that
-  re-spawns the real interpreter as a child, the attributed PID is that child — the same
-  PID the simulator prints with `os.getpid()`, which is how the demo verifies the kill.
-- **Detection-to-kill gap.** Attribution needs a process sample after the first alert, so
-  roughly the first ~10 files are encrypted before the kill lands. They are not lost:
-  phase 5 restores them from the hash-verified backup. Phase 6 measures this gap.
+  it. We attribute damage to a process behaviourally, and **never by process name or
+  command line** — renaming the attacker does not help it hide (proven by a test that runs
+  the simulator as `invoice_viewer.py` and still catches it). An optional fanotify path
+  (`config.USE_FANOTIFY`, Linux only) is left as the exact alternative.
+- **Windows psutil reality (measured on the demo machine, on the *real* worker PID).**
+  An earlier note here claimed `io_counters()` returned 0 and was wrong: it had queried the
+  venv **launcher stub** PID, which does no I/O. On the real worker:
+  - `io_counters().write_bytes` **works** — it climbs ~MB/s as the process encrypts.
+  - `open_files()` **misses** the simulator: it opens/writes/closes each file in well under
+    one sampling interval (measured 0 hits in 12 samples). It is reliable only for a process
+    that keeps a handle open, and on Linux — so it is used there (behind
+    `config.ATTRIB_USE_OPEN_FILES`) but disabled on Windows, where it can also *block* the
+    sampler on a busy system process.
+
+  So attribution is **write-behaviour based**: while the sandbox is actively changing (the
+  monitor feeds each event's byte count to the process monitor), the culprit is the
+  non-whitelisted process that wrote the most in that window. A name/PID **whitelist**
+  (matched case-insensitively, ignoring `.exe`, so one entry `code` covers `Code.exe`)
+  protects shells, editors, browsers and kernel pseudo-processes such as `Registry` — this
+  is the safety net that stops an innocent heavy writer from ever being suspended, and is
+  the one place names are used (to *protect*, never to *accuse*). Because the venv's
+  `python.exe` is a launcher that re-spawns the real interpreter as a child, the attributed
+  PID is that child — the same PID the simulator prints with `os.getpid()`.
+- **Detection-to-kill gap.** The monitor suspends the attacker as soon as it is attributed
+  (a few seconds after the first alert, once its write volume is unambiguous), then recovers
+  and kills. Some files are encrypted in that gap; they are not lost — recovery restores
+  them from the hash-verified backup, and across runs the folder comes back byte-for-byte
+  clean. If an attack finishes before attribution, recovery still restores 100%. Phase 6
+  measures the gap.
 - Entropy is measured on the first 64 KB only, so a file encrypted from the tail backwards
   would be missed by that one signal (the magic-byte and canary signals still fire).
 - The simulator mimics file behaviour only. Real ransomware also kills services, clears

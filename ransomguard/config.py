@@ -67,18 +67,50 @@ PROC_SAMPLE_INTERVAL: float = 0.3     # seconds between psutil io_counters sampl
 PROC_WINDOW_SEC: float = 5.0          # how far back "recently active in sandbox" looks
 PROC_MIN_WRITE_RATE: int = 64 * 1024  # bytes/s below which a process is not a suspect
 
-# Never suspend/stop these, whatever the score says.
+# Never suspend/stop these, whatever the score says. Names are matched case-insensitively
+# and with any ".exe" suffix stripped (see ProcessMonitor.is_whitelisted), so "code" here
+# matches "Code.exe" on Windows and "code" on Linux. This is a safety net; the real
+# attribution tie is write-volume correlation, not the name.
 PROTECTED_PROC_NAMES: frozenset[str] = frozenset(
     {
+        # unix / shells / dev tools
         "systemd", "init", "kthreadd", "sshd", "bash", "sh", "zsh", "dash",
-        "gnome-shell", "Xorg", "dbus-daemon", "code", "pytest", "streamlit",
-        "explorer.exe", "powershell.exe", "pwsh.exe", "cmd.exe", "System",
+        "gnome-shell", "xorg", "dbus-daemon", "code", "pytest", "streamlit",
+        # editors / browsers that legitimately write a lot
+        "chrome", "msedge", "firefox", "node",
+        # windows shell / service host processes
+        "explorer", "powershell", "pwsh", "cmd", "conhost", "system",
+        "svchost", "services", "lsass", "winlogon", "csrss", "wininit", "smss",
+        "dwm", "taskhostw", "runtimebroker", "sihost", "ctfmon", "fontdrvhost",
+        "searchindexer", "searchhost", "searchprotocolhost", "searchfilterhost",
+        "startmenuexperiencehost", "textinputhost", "audiodg", "spoolsv",
+        "msmpeng", "securityhealthservice", "shellexperiencehost",
+        # kernel / pseudo processes that can show high I/O but are not real user processes
+        "registry", "memcompression", "secure system", "system idle process",
+        "msedgewebview2", "msedge", "widgets", "wmiprvse",
     }
 )
-# The simulator is a python process like ours, so we identify it by its script name.
-SIMULATOR_HINT: str = "fake_ransomware"
 
-USE_FANOTIFY: bool = False  # optional kernel-level PID attribution (Linux only, phase 4)
+# Behaviour-based attribution (signal B): while the sandbox is actively changing, the
+# culprit is the non-whitelisted process writing the most. We require the candidate to have
+# written at least this many bytes in the window (so trivial writers are ignored) and we
+# rank by write volume, so the heaviest writer - the one producing the ciphertext - wins.
+# The sandbox byte volume is still recorded (for the log and as a sanity check) but is not a
+# hard gate, because Windows write-buffering can make a process's write_bytes lag the
+# sandbox growth. The name whitelist above, not this rule, is what protects editors/system.
+ATTRIB_MIN_WRITE_BYTES: int = 32 * 1024
+ATTRIB_MIN_SANDBOX_BYTES: int = 4096   # ignore trivial sandbox changes
+ATTRIB_TIMEOUT_SEC: float = 6.0        # how long to keep trying to attribute after an alert
+# NOTE: attribution is purely behaviour-based - write-rate spike correlated with sandbox
+# file activity, confirmed by open files in the sandbox. We deliberately do NOT identify a
+# process by its name or command line, so renaming the attacker does not evade detection.
+
+USE_FANOTIFY: bool = False  # optional kernel-level PID attribution (Linux only)
+
+# open_files() as an attribution confirmation (signal A). OFF by default because on Windows
+# it both misses the simulator's quick-open/close handles AND can block the sampler on busy
+# system processes. On Linux it is reliable and cheap, so it can be turned on there.
+ATTRIB_USE_OPEN_FILES: bool = False
 
 # ---------------------------------------------------------------------------
 # Canary files (phase 3)
