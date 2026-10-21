@@ -23,7 +23,7 @@ lost, files restored, false positives) and not just a demo.
 | 2 | attack simulator + undo | done |
 | 3 | baseline, canary files, watchdog monitor, scorer (log only) | done |
 | 4 | process monitor + responder (suspend/kill) | done |
-| 5 | backup + hash-verified recovery | planned |
+| 5 | backup + hash-verified recovery | done |
 | 6 | evaluation runs, results table, charts | planned |
 | 7 | Streamlit dashboard, README polish | planned |
 
@@ -85,6 +85,36 @@ The monitor logs `ALERT -> culprit(pid) -> suspend -> kill`. The killed PID matc
 PID the simulator printed, which is how we verify the right process was stopped. A typical
 run stops the attack after ~10 of 16 files (corpus + canaries); the gap is the time to
 attribute a PID, and phase 5 restores those encrypted files from the backup.
+
+## Run (phase 5: enforce + recover - the full pipeline)
+
+```bash
+python -m ransomguard.monitor --enforce --duration 25
+python -m simulator.fake_ransomware --delay 0.25 --order alphabetical
+```
+
+The monitor now logs the complete response, in this deliberate order:
+
+```
+ALERT -> culprit(pid) -> suspend -> recovery(affected/restored/failed) -> kill
+```
+
+The order matters: we **suspend first** (freezing the attacker so it cannot damage more
+files), **recover while it is frozen** (restore every changed/deleted/`.locked` file from
+the hash-verified backup and delete the artifacts), and **kill last**. A clean run ends
+with the folder byte-for-byte identical to its clean state - every restored file is
+re-hashed against the manifest, so `restored` is a verified count, and `.locked` files
+left = 0.
+
+Backup details: at startup the folder is snapshotted to `./sandbox/.backup` with a
+SHA-256 manifest. A background thread folds **benign** edits into the backup every few
+seconds (same name, magic bytes intact, no high-entropy jump), but never while an alert is
+active - so ransomware output can never overwrite a good backup. Recovery restores from
+this backup, not from the simulator's key, so it works against real ransomware too.
+
+If an attack is so fast it finishes before a PID can be attributed, the monitor still runs
+recovery (logged as `enforce_unattributed -> recovery`) and restores 100% of the files -
+the kill simply has nothing left to stop.
 
 Example output of `demo_entropy.py` (phase 1):
 

@@ -25,15 +25,17 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from pathlib import Path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from . import backup as backup_mod
 from . import baseline as baseline_mod
 from . import canary as canary_mod
-from . import config, entropy
+from . import config, entropy, recovery
 from .logger import EventLogger
 from .process_monitor import ProcessMonitor
 from .responder import Responder
@@ -67,10 +69,13 @@ class RansomGuardMonitor:
             Responder(self.logger, self.proc_monitor) if enforce else None
         )
         self._handled = False  # we act once per attack, then keep logging
+        self._alert_active = False  # pauses backup refresh during an attack
 
         self.baseline: dict[str, baseline_mod.BaselineEntry] = {}
         self.canaries: dict[str, str] = {}
         self._observer: Observer | None = None
+        self._refresh_thread: threading.Thread | None = None
+        self._stop_refresh = threading.Event()
 
     # ------------------------------------------------------------------ setup
     def prepare(self, rebuild: bool = True) -> None:
@@ -79,18 +84,39 @@ class RansomGuardMonitor:
             self.canaries = canary_mod.deploy_canaries(self.root)
             self.baseline = baseline_mod.build_baseline(self.root)
             baseline_mod.save_baseline(self.baseline)
+            # Snapshot a clean, hash-verified backup now, while the folder is trusted.
+            manifest = backup_mod.build_backup(self.root)
         else:
             self.canaries = canary_mod.load_canaries()
             self.baseline = baseline_mod.load_baseline()
+            manifest = backup_mod.load_manifest()
         if self.proc_monitor is not None:
             self.proc_monitor.start()  # begin sampling write rates before any attack
+        if self.enforce:
+            self._start_backup_refresh()
         self.logger.log(
             "startup",
             path=str(self.root),
             files=len(self.baseline),
             canaries=len(self.canaries),
+            backed_up=len(manifest),
             enforce=self.enforce,
         )
+
+    def _start_backup_refresh(self) -> None:
+        """Periodically fold benign edits into the backup, but never during an alert."""
+
+        def loop() -> None:
+            while not self._stop_refresh.wait(config.BACKUP_REFRESH_SEC):
+                try:
+                    n = backup_mod.refresh_clean(self.root, active_alert=self._alert_active)
+                    if n:
+                        self.logger.log("backup_refresh", files=n)
+                except Exception:
+                    pass  # a refresh failure must never take down the monitor
+
+        self._refresh_thread = threading.Thread(target=loop, name="backup-refresh", daemon=True)
+        self._refresh_thread.start()
 
     def _is_ignored(self, path: Path) -> bool:
         """Skip the backup folder and our own metadata files - they are not user data."""
@@ -172,6 +198,7 @@ class RansomGuardMonitor:
         if not self.enforce or self._handled:
             return
         self._handled = True
+        self._alert_active = True  # freeze backup refresh for the duration of the response
         self._enforce()
 
     def _resolve_culprit(self, timeout: float = 2.0, poll: float = 0.2):
@@ -193,7 +220,14 @@ class RansomGuardMonitor:
         return None
 
     def _enforce(self) -> None:
-        """Suspend and kill the attributed process (phase 5 will recover in between)."""
+        """
+        Stop the attacker and recover the files, in the safe order:
+            suspend (freeze damage) -> recover from backup while frozen -> kill.
+
+        Recovering before the kill means the process cannot encrypt any more files while we
+        are restoring them, which removes a race where a resumed process re-damages a file
+        we just put back.
+        """
         assert self.responder is not None
         suspect = self._resolve_culprit()
         if suspect is None:
@@ -201,16 +235,37 @@ class RansomGuardMonitor:
                 "enforce_unattributed",
                 note="score crossed threshold but no process could be attributed",
             )
+            self._recover()  # still try to repair the damage even if we cannot attribute
             return
+
         self.logger.log(
-            "culprit", pid=suspect.pid, name=suspect.name,
-            write_rate=int(suspect.write_rate),
+            "culprit", pid=suspect.pid, name=suspect.name, write_rate=int(suspect.write_rate),
         )
-        resp = self.responder.respond(suspect.pid, kill_now=True)
+        # 1. Suspend only - freeze the process without killing it yet.
+        resp = self.responder.respond(suspect.pid, kill_now=False)
+        self.logger.log("suspend_done", pid=resp.pid, suspended=resp.suspended, refused=resp.refused)
+
+        # 2. Recover the files while the attacker is frozen.
+        self._recover()
+
+        # 3. Now kill the frozen process.
+        resp = self.responder.kill(resp)
         self.logger.log(
             "response_done", pid=resp.pid, name=resp.name,
             suspended=resp.suspended, killed=resp.killed, refused=resp.refused,
         )
+
+    def _recover(self) -> recovery.RecoveryResult:
+        """Restore the folder from the hash-verified backup and log the outcome."""
+        result = recovery.recover(self.root)
+        self.logger.log(
+            "recovery",
+            affected=result.affected,
+            restored=result.restored,
+            failed=result.failed,
+            removed_artifacts=result.removed,
+        )
+        return result
 
     # --------------------------------------------------------------- watchdog
     def start(self) -> None:
@@ -227,6 +282,10 @@ class RansomGuardMonitor:
             self._observer = None
         if self.proc_monitor is not None:
             self.proc_monitor.stop()
+        self._stop_refresh.set()
+        if self._refresh_thread is not None:
+            self._refresh_thread.join(timeout=3)
+            self._refresh_thread = None
         self.logger.log("shutdown", actor=GLOBAL_ACTOR, score=round(self.scorer.score_of(GLOBAL_ACTOR), 1))
 
 

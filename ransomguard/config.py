@@ -50,6 +50,7 @@ W_CANARY: int = 60           # a canary/honey file was touched -> almost certain
 W_SUSPICIOUS_EXT: int = 15   # renamed to .locked/.enc/... or to an unknown new extension
 W_BURST: int = 20            # many modifications in a few seconds
 
+BACKUP_REFRESH_SEC: float = 10.0   # how often to refresh the backup with clean file edits
 SCORE_THRESHOLD: int = 70          # act (suspend + stop) at or above this score
 SCORE_HALF_LIFE_SEC: float = 30.0  # scores halve every 30 s so normal work cannot pile up
 BURST_WINDOW_SEC: float = 5.0
@@ -62,7 +63,7 @@ SUSPICIOUS_EXTS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 # Process monitor (phase 4)
 # ---------------------------------------------------------------------------
-PROC_SAMPLE_INTERVAL: float = 0.5     # seconds between psutil io_counters samples
+PROC_SAMPLE_INTERVAL: float = 0.3     # seconds between psutil io_counters samples
 PROC_WINDOW_SEC: float = 5.0          # how far back "recently active in sandbox" looks
 PROC_MIN_WRITE_RATE: int = 64 * 1024  # bytes/s below which a process is not a suspect
 
