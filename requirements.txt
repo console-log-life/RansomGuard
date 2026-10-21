@@ -1,0 +1,6 @@
+watchdog>=4.0
+psutil>=5.9
+cryptography>=42.0
+streamlit>=1.30
+matplotlib>=3.8
+pytest>=8.0
