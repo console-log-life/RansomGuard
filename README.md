@@ -20,8 +20,8 @@ lost, files restored, false positives) and not just a demo.
 | Phase | Contents | State |
 |-------|----------|-------|
 | 1 | entropy / chi-square / magic bytes, test corpus, demo, unit tests | done |
-| 2 | attack simulator + undo | planned |
-| 3 | baseline, canary files, watchdog monitor, scorer (log only) | planned |
+| 2 | attack simulator + undo | done |
+| 3 | baseline, canary files, watchdog monitor, scorer (log only) | done |
 | 4 | process monitor + responder (suspend/stop) | planned |
 | 5 | backup + hash-verified recovery | planned |
 | 6 | evaluation runs, results table, charts | planned |
@@ -51,7 +51,27 @@ python demo_entropy.py
 python -m pytest tests -q
 ```
 
-Example output of `demo_entropy.py`:
+## Run (phase 3: live monitor, log-only)
+
+```bash
+# terminal 1 - start the detector (rebuilds baseline + canaries, then watches)
+python -m ransomguard.monitor --path ./sandbox/protected
+#   or auto-stop after N seconds for a scripted demo:
+python -m ransomguard.monitor --duration 20
+
+# terminal 2 - launch the safe simulator against it
+python -m simulator.fake_ransomware --delay 0.12 --order alphabetical
+
+# afterwards: inspect the structured log
+python -c "import json;[print(l.strip()) for l in open('sandbox/events.jsonl')]"
+python -m simulator.undo        # restore the corpus
+```
+
+In phase 3 the monitor only *logs* the alert; it does not kill or restore yet. With
+alphabetical order the attacker meets the `aaa_` canary first, so the alert fires on the
+very first encrypted file (score 85 = canary 60 + low-chi 10 + suspicious-ext 15).
+
+Example output of `demo_entropy.py` (phase 1):
 
 ```
 file                              size  entropy     chi-square    magic        verdict
