@@ -16,18 +16,12 @@ from __future__ import annotations
 
 import base64
 import os
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
 from ransomguard import config, entropy
 from ransomguard.baseline import BaselineEntry
 from ransomguard.scorer import evaluate_signals
-
-PY = sys.executable
-ROOT = Path(__file__).resolve().parent.parent
 
 
 # ------------------------------------------------- encoded / base64 detection
@@ -87,29 +81,38 @@ def test_entropy_jump_fires_with_multi_offset_not_without(tmp_path, monkeypatch)
 
 # ------------------------------------------------- safety: keys never encrypted
 @pytest.mark.parametrize("mode", ["full", "slow", "no-rename", "base64", "intermittent"])
-def test_simulator_never_encrypts_recovery_keys(mode):
+def test_simulator_never_encrypts_recovery_keys(mode, tmp_path, monkeypatch):
     """No attack mode may touch backup_key.bin or the manifest - recovery must stay possible.
 
-    Runs against the real sandbox (safe: sandbox-only), building a backup first so the key
-    and manifest exist, then attacking and checking both are byte-identical afterwards.
+    Runs entirely in a throwaway tmp sandbox (config paths monkeypatched) and drives the
+    simulator IN-PROCESS, so it cannot collide with a concurrent evaluation run using the
+    real ./sandbox.
     """
-    subprocess.run([PY, "tools/make_test_files.py", "--clean"], cwd=ROOT,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    # Create the protected key + manifest by building a backup.
-    subprocess.run(
-        [PY, "-c", "import sys; sys.path.insert(0,'.'); from ransomguard import backup; backup.build_backup()"],
-        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
-    )
+    from ransomguard import backup as backup_mod
+    from simulator import fake_ransomware
+
+    sb = tmp_path / "sandbox"
+    protected = sb / "protected"
+    protected.mkdir(parents=True)
+    monkeypatch.setattr(config, "SANDBOX", sb)
+    monkeypatch.setattr(config, "PROTECTED_DIR", protected)
+    monkeypatch.setattr(config, "BACKUP_DIR", sb / ".backup")
+    monkeypatch.setattr(config, "MANIFEST_FILE", sb / ".backup" / "manifest.json")
+    monkeypatch.setattr(config, "BACKUP_KEY_FILE", sb / "backup_key.bin")
+    monkeypatch.setattr(config, "SIM_KEY_FILE", sb / "sim_key.bin")
+    monkeypatch.setattr(config, "SIM_PID_FILE", sb / "sim_pid.txt")
+
+    # A small corpus (a text file and a structured file), then a backup so the key +
+    # manifest exist to be protected.
+    (protected / "notes.txt").write_text("hello world " * 400, encoding="utf-8")
+    (protected / "report.pdf").write_bytes(b"%PDF-1.4\n" + b"body " * 300)
+    backup_mod.build_backup(protected)
     key_before = config.BACKUP_KEY_FILE.read_bytes()
     manifest_before = config.MANIFEST_FILE.read_bytes()
 
-    subprocess.run(
-        [PY, "-m", "simulator.fake_ransomware", "--mode", mode, "--delay", "0", "--order", "asis"],
-        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    rc = fake_ransomware.main(
+        ["--path", str(protected), "--mode", mode, "--delay", "0", "--order", "asis"]
     )
-
+    assert rc == 0
     assert config.BACKUP_KEY_FILE.read_bytes() == key_before, f"{mode} touched the backup key!"
     assert config.MANIFEST_FILE.read_bytes() == manifest_before, f"{mode} touched the manifest!"
-    # tidy up
-    subprocess.run([PY, "-m", "simulator.undo"], cwd=ROOT,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -190,7 +190,7 @@ def _operational(mode: str, canaries_on: bool) -> dict:
     recoveries = [e for e in events if e["event"] == "recovery"]
     correct = "no_kill"
     if killed_pid is not None:
-        correct = "yes" if (sim_pid is not None and int(killed_pid) == sim_pid) else "wrong_pid"
+        correct = "yes" if (sim_pid is not None and int(killed_pid) == sim_pid) else "wrong_pid_suspended"
 
     dt = round(float(suspend_at) - sim_start, 3) if suspend_at is not None else None
     return {

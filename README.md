@@ -322,6 +322,15 @@ on every mode is caught. Recovery restored the folder to a byte-for-byte clean s
 10 matrix cells (ground truth), and `clean pre-sweep` shows several cells needed the final
 stop() recovery sweep to get there.
 
+> **Honest caveat.** This before/after gap is measured on a **text-only** corpus on
+> purpose. Every encrypted file begins with the simulator's container header (`RGSIM1`),
+> which destroys the original magic bytes - so on a **mixed** corpus the OLD detector would
+> already catch `base64` and `intermittent` too, via the magic-byte signal on the
+> structured files (pdf/jpg/docx/…). Text files have no magic bytes to break, so they are
+> the hard case that isolates the new entropy/encoded signals. In other words, the upgrades
+> matter most for plaintext-heavy data; for structured files the existing magic-byte signal
+> was already doing the job.
+
 ## Cryptographic protection of the backup, manifest and log
 
 The backup and the evidence are themselves hardened, so an attacker who reaches them cannot
