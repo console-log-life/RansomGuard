@@ -179,9 +179,9 @@ scrolling feed of file events with the signals that fired. It auto-refreshes eve
 
 | metric | value |
 |--------|-------|
-| attacks attributed + killed | 9 / 10 (the 0.05 s/file trial finished before a PID could be attributed) |
-| detection time (attack start → suspended) | mean 1.63 s, min 0.59 s, max 3.17 s |
-| files encrypted before the attacker was stopped | mean 7.6 of 16, min 2, max 16 |
+| attacks attributed / killed | 6 / 10 attributed, 6 / 10 killed (fast attacks finish before a kill; recovery still restores them) |
+| detection time (attack start → suspended) | mean 3.07 s, min 2.21 s, max 4.12 s |
+| files encrypted before the attacker was stopped | mean 12.2 of 16, min 7, max 16 |
 | **folder fully clean at end (ground truth)** | **10 / 10 trials**, 0 leftover `.locked`, 0 failures |
 | false positives on benign work | **0** across 3 runs |
 | wrongful kills on benign work | **0** |

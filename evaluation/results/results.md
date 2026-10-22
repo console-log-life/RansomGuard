@@ -2,23 +2,23 @@
 
 | # | order | delay | files | detection (s) | attributed | killed | encrypted | final recovered | folder clean |
 |---|-------|-------|-------|---------------|------------|--------|-----------|-----------------|--------------|
-| 1 | alphabetical | 0.05s | 16 | - | yes | no | 16 | 16/16 | yes |
-| 2 | alphabetical | 0.1s | 16 | 1.561 | yes | yes | 9 | 16/16 | yes |
-| 3 | alphabetical | 0.2s | 16 | 2.666 | yes | yes | 6 | 16/16 | yes |
-| 4 | alphabetical | 0.3s | 16 | 3.308 | yes | yes | 10 | 16/16 | yes |
-| 5 | alphabetical | 0.4s | 16 | 1.394 | yes | yes | 3 | 16/16 | yes |
+| 1 | alphabetical | 0.05s | 16 | - | no | no | 16 | 16/16 | yes |
+| 2 | alphabetical | 0.1s | 16 | - | no | no | 16 | 16/16 | yes |
+| 3 | alphabetical | 0.2s | 16 | - | no | no | 16 | 16/16 | yes |
+| 4 | alphabetical | 0.3s | 16 | 2.893 | yes | yes | 8 | 16/16 | yes |
+| 5 | alphabetical | 0.4s | 16 | 2.963 | yes | yes | 7 | 16/16 | yes |
 | 6 | random | 0.05s | 16 | - | no | no | 16 | 16/16 | yes |
-| 7 | random | 0.1s | 16 | 1.608 | yes | yes | 12 | 16/16 | yes |
-| 8 | random | 0.2s | 16 | 1.512 | yes | yes | 6 | 16/16 | yes |
-| 9 | random | 0.3s | 16 | 1.323 | yes | yes | 4 | 16/16 | yes |
-| 10 | random | 0.4s | 16 | 2.651 | yes | yes | 7 | 16/16 | yes |
+| 7 | random | 0.1s | 16 | 2.207 | yes | yes | 13 | 16/16 | yes |
+| 8 | random | 0.2s | 16 | 2.726 | yes | yes | 11 | 16/16 | yes |
+| 9 | random | 0.3s | 16 | 3.518 | yes | yes | 10 | 16/16 | yes |
+| 10 | random | 0.4s | 16 | 4.116 | yes | yes | 9 | 16/16 | yes |
 
 **Attack summary**
 
 - trials: 10
-- attributed: 9/10; killed: 8/10 (fast attacks can finish before a kill; recovery still restores them)
-- detection time: mean 2.00s, min 1.32s, max 3.31s
-- files encrypted before stop: mean 8.9, min 3, max 16
+- attributed: 6/10; killed: 6/10 (fast attacks can finish before a kill; recovery still restores them)
+- detection time: mean 3.07s, min 2.21s, max 4.12s
+- files encrypted before stop: mean 12.2, min 7, max 16
 - recovery rate (recovery self-report): mean 100.0%
 - **folder fully clean at end (ground truth): 10/10 trials**
 - leftover .locked artifacts across all trials: 0
