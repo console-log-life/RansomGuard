@@ -216,23 +216,23 @@ class RansomGuardMonitor:
         self._enforce_thread = threading.Thread(target=self._enforce, name="enforce", daemon=True)
         self._enforce_thread.start()
 
-    def _resolve_culprit(self, timeout: float = config.ATTRIB_TIMEOUT_SEC, poll: float = 0.2):
+    def _resolve_suspects(self, timeout: float = config.ATTRIB_TIMEOUT_SEC, poll: float = 0.2):
         """
-        Ask the process monitor who to stop, retrying briefly.
+        Ask the process monitor for the ranked suspect list, retrying briefly until non-empty.
 
         The first canary hit can trip the alert before the sampler has a full write-rate
-        sample, so most_likely_suspect() may be None for a moment. Because the simulator
-        keeps writing, a short poll reliably surfaces it as the top sandbox writer. This
-        retry is the practical answer to the PID-attribution race described in the README.
+        sample, so the list may be empty for a moment. Because the simulator keeps writing,
+        a short poll reliably surfaces it. Returning the whole ranked list (not just the top)
+        lets _enforce fall through to the next candidate if the best one cannot be suspended.
         """
         assert self.proc_monitor is not None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            suspect = self.proc_monitor.most_likely_suspect()
-            if suspect is not None:
-                return suspect
+            suspects = self.proc_monitor.get_suspects()
+            if suspects:
+                return suspects
             time.sleep(poll)
-        return None
+        return []
 
     def _enforce(self) -> None:
         """
@@ -245,8 +245,8 @@ class RansomGuardMonitor:
         """
         assert self.responder is not None
         self._responded = True
-        suspect = self._resolve_culprit()
-        if suspect is None:
+        suspects = self._resolve_suspects()
+        if not suspects:
             self.logger.log(
                 "enforce_unattributed",
                 note="score crossed threshold but no process could be attributed",
@@ -255,27 +255,34 @@ class RansomGuardMonitor:
             self._rearm()    # and stay armed in case the attack continues
             return
 
-        self.logger.log(
-            "culprit", pid=suspect.pid, name=suspect.name, write_rate=int(suspect.write_rate),
-        )
-        # 1. Suspend only - freeze the process without killing it yet.
-        resp = self.responder.respond(suspect.pid, kill_now=False)
-        self.logger.log("suspend_done", pid=resp.pid, suspended=resp.suspended, refused=resp.refused)
+        # 1. Suspend the best candidate; if that fails (e.g. access denied), fall through to
+        #    the next-ranked suspect in the SAME wave instead of giving up.
+        resp = None
+        for suspect in suspects:
+            self.logger.log(
+                "culprit", pid=suspect.pid, name=suspect.name, write_rate=int(suspect.write_rate),
+            )
+            resp = self.responder.respond(suspect.pid, kill_now=False)  # suspend only
+            self.logger.log(
+                "suspend_done", pid=resp.pid, suspended=resp.suspended, refused=resp.refused,
+            )
+            if resp.suspended:
+                break  # frozen - stop trying candidates
 
-        # 2. Recover the files while the attacker is frozen.
+        # 2. Recover the files (works whether or not a suspend succeeded).
         self._recover()
 
-        # 3. Now kill the frozen process.
-        resp = self.responder.kill(resp)
-        self.logger.log(
-            "response_done", pid=resp.pid, name=resp.name,
-            suspended=resp.suspended, killed=resp.killed, refused=resp.refused,
-        )
-        # 4. A final recovery sweep, then re-arm. Attribution is a heuristic: if we killed
-        #    the wrong PID (another writer) the real attacker may still be encrypting, so a
-        #    single early response is not enough. Re-arming lets a continuing attack trip the
-        #    score again and be attributed afresh - on the next wave the real attacker is the
-        #    dominant writer - until the folder is actually clean.
+        # 3. Kill the frozen process (no-op if nothing was suspended).
+        if resp is not None and resp.suspended:
+            resp = self.responder.kill(resp)
+            self.logger.log(
+                "response_done", pid=resp.pid, name=resp.name,
+                suspended=resp.suspended, killed=resp.killed, refused=resp.refused,
+            )
+
+        # 4. A final recovery sweep, then re-arm. Attribution is a heuristic: if the attacker
+        #    is still encrypting, re-arming lets a continuing attack trip the score again and
+        #    be attributed afresh until the folder is actually clean.
         self._recover()
         self._rearm()
 

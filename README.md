@@ -378,6 +378,21 @@ python -c "from ransomguard import backup; backup.load_manifest()"   # raises Ma
   command line** — renaming the attacker does not help it hide (proven by a test that runs
   the simulator as `invoice_viewer.py` and still catches it). An optional fanotify path
   (`config.USE_FANOTIFY`, Linux only) is left as the exact alternative.
+- **Live mis-attribution we found and fixed.** In one live run the first ALERT fired (on a
+  canary) before the real simulator had built up write volume, and the heaviest writer *at
+  that instant* was a Windows background service (`Dell.TechHub.DataManager.SubAgent.exe`)
+  flushing to disk. The detector picked it as culprit and tried to suspend it; it only
+  failed because the terminal was not elevated, and the real attacker (`python.exe`) was
+  caught ~2 s later by the re-arm logic. Two fixes followed, both still behaviour-based:
+  (1) only processes **owned by the current user** are ever considered - SYSTEM / LOCAL
+  SERVICE / NETWORK SERVICE and any process whose owner we cannot read are excluded, because
+  a user-level tool must not touch system services; (2) if a suspend fails, the responder
+  immediately tries the **next-ranked** suspect in the same wave. The deeper lesson is that
+  user-space write-rate attribution is inherently a heuristic that can be fooled by a
+  coincidental writer; a production EDR would need **kernel-level file→PID attribution** (a
+  Windows minifilter driver, or fanotify/eBPF on Linux) to know for certain which process
+  wrote a given file. That is out of scope for a user-space student project, and recovery
+  from the hash-verified backup is the safety net when attribution is wrong.
 - **Windows psutil reality (measured on the demo machine, on the *real* worker PID).**
   An earlier note here claimed `io_counters()` returned 0 and was wrong: it had queried the
   venv **launcher stub** PID, which does no I/O. On the real worker:

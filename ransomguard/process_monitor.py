@@ -76,6 +76,13 @@ class ProcessMonitor:
         self.own_pid = os.getpid()
         # Protect our whole ancestry (the shell/IDE that launched us) from ever being killed.
         self._protected_pids = self._ancestor_pids(self.own_pid)
+        # Only ever consider processes owned by the SAME user as us. A user-level detector
+        # must never touch SYSTEM / LOCAL SERVICE / NETWORK SERVICE processes (a live run
+        # once mis-picked a Windows background service writing to disk at that moment).
+        try:
+            self._own_user = psutil.Process(self.own_pid).username()
+        except (psutil.Error, OSError):
+            self._own_user = None
 
         self._lock = threading.Lock()
         self._prev_writes: dict[int, tuple[int, float]] = {}   # pid -> (write_bytes, ts)
@@ -121,6 +128,29 @@ class ProcessMonitor:
         """Normalise a process name for whitelist matching: lowercase, drop any .exe."""
         name = (name or "").casefold()
         return name[:-4] if name.endswith(".exe") else name
+
+    _SYSTEM_ACCOUNTS = (
+        "nt authority\\system", "nt authority\\local service",
+        "nt authority\\network service", "local service", "network service",
+        "\\system", "root",
+    )
+
+    def _owner_ok(self, pid: int) -> bool:
+        """True only if `pid` is owned by the current user (and not a system account).
+
+        If the owner cannot be read (access denied, process gone), we return False - a
+        detector that cannot even see who owns a process must not try to suspend it.
+        """
+        try:
+            user = psutil.Process(pid).username()
+        except (psutil.Error, OSError):
+            return False
+        if not user:
+            return False
+        low = user.lower()
+        if any(acct in low for acct in self._SYSTEM_ACCOUNTS):
+            return False
+        return self._own_user is not None and user == self._own_user
 
     def is_whitelisted(self, pid: int, name: str) -> bool:
         """Processes we must never act on: ourselves, our ancestry, and config names.
@@ -282,6 +312,10 @@ class ProcessMonitor:
             writes_meaningfully = sandbox_active and delta >= config.ATTRIB_MIN_WRITE_BYTES
 
             if not (open_in_sandbox or writes_meaningfully):
+                continue
+            # Ownership gate (checked only for the handful of real candidates, so it stays
+            # cheap): never suspect a process we don't own or can't read the owner of.
+            if not self._owner_ok(pid):
                 continue
             suspects.append(
                 Suspect(

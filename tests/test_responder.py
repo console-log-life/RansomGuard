@@ -194,6 +194,56 @@ def test_attribution_ignores_process_name(tmp_path):
         _cleanup(writer, worker_pid)
 
 
+def test_owner_ok_accepts_self_rejects_system_and_unreadable():
+    # The current process (us) must pass; a SYSTEM-owned or unreadable-owner process fails.
+    pm = ProcessMonitor(config.SANDBOX)
+    assert pm._owner_ok(os.getpid()) is True
+
+    system_pids = []
+    for proc in psutil.process_iter(["pid"]):
+        try:
+            if any(a in (proc.username() or "").lower() for a in pm._SYSTEM_ACCOUNTS):
+                system_pids.append(proc.info["pid"])
+        except psutil.Error:
+            system_pids.append(proc.info["pid"])  # unreadable owner counts too
+        if len(system_pids) >= 1:
+            break
+    if system_pids:  # there is always at least one on a real OS, but guard anyway
+        assert pm._owner_ok(system_pids[0]) is False
+
+
+def test_heavy_writer_owned_by_other_user_is_never_chosen(tmp_path, monkeypatch):
+    # A heavy sandbox writer whose owner check fails (different user / unreadable) must be
+    # excluded from get_suspects, even though its write behaviour would otherwise qualify.
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    pm = ProcessMonitor(sandbox, interval=0.2)
+    pm.start()
+    writer, worker_pid = _spawn_writer(sandbox, tmp_path / "w.pid")
+    try:
+        # Pretend every candidate is owned by someone else / unreadable.
+        monkeypatch.setattr(pm, "_owner_ok", lambda pid: False)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            pm.note_sandbox_activity(262144)
+            time.sleep(0.2)
+        assert pm.get_suspects() == []            # behaviour qualifies, ownership forbids
+        # And with the real owner check (we DO own the writer), it is chosen again.
+        monkeypatch.undo()
+        found = False
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            pm.note_sandbox_activity(262144)
+            if any(s.pid == worker_pid for s in pm.get_suspects()):
+                found = True
+                break
+            time.sleep(0.2)
+        assert found
+    finally:
+        pm.stop()
+        _cleanup(writer, worker_pid)
+
+
 def test_no_suspect_without_sandbox_activity(tmp_path):
     # Safety: a hard writer must NOT be blamed when the sandbox is quiet (no fs activity)
     # and we never caught an open handle - otherwise we could kill an innocent busy process.

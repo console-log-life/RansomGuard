@@ -144,7 +144,7 @@ for e in reversed(fs_events[-200:]):
         }
     )
 if rows:
-    st.dataframe(rows, use_container_width=True, height=360)
+    st.dataframe(rows, width="stretch", height=360)
 else:
     st.write("No file events yet.")
 
