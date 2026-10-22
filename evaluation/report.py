@@ -118,7 +118,11 @@ def build_table(results: list[dict]) -> str:
     rate = [r["recovery_rate"] for r in attacks]
     lines.append("\n**Attack summary**\n")
     lines.append(f"- trials: {len(attacks)}")
-    lines.append(f"- attributed + killed: {sum(r['attributed'] for r in attacks)}/{len(attacks)}")
+    lines.append(
+        f"- attributed: {sum(r['attributed'] for r in attacks)}/{len(attacks)}; "
+        f"killed: {sum(r['killed'] for r in attacks)}/{len(attacks)} "
+        f"(fast attacks can finish before a kill; recovery still restores them)"
+    )
     if det:
         lines.append(f"- detection time: mean {mean(det):.2f}s, min {min(det):.2f}s, max {max(det):.2f}s")
     lines.append(f"- files encrypted before stop: mean {mean(enc):.1f}, min {min(enc)}, max {max(enc)}")

@@ -281,8 +281,17 @@ Two detection upgrades (both toggleable via `config.FEATURE_*`, which is how the
 reproduces the "old" detector for the before/after comparison):
 
 - **Multi-offset entropy.** Instead of sampling only the first 64 KB, the detector samples
-  several windows across the file and keeps the most suspicious one. Partial/intermittent
-  encryption can no longer hide in an untouched region.
+  several windows (`config.ENTROPY_WINDOWS`, default 6) across the file and keeps the most
+  suspicious one. Partial/intermittent encryption can no longer hide in an untouched region.
+  *Latency trade-off (measured, not hidden):* reading 6 windows instead of 1 makes
+  `analyse_file` on a large (~2 MB) file about 6x slower (~8 ms -> ~50 ms per call after
+  optimising it to compute each window's entropy once). Because analysis runs synchronously
+  on every watchdog event, this extra per-event latency lets a fast attacker encrypt a
+  couple more files before the score crosses the threshold - across evaluation runs the
+  live kill rate moved from ~9/10 to ~8/10 and mean files-encrypted rose from ~7.6 to ~8-9.
+  No files are lost (recovery still restores 10/10 to a clean folder); it is a
+  detection-latency cost of looking harder, and the sampling (windows, not whole files)
+  keeps it bounded.
 - **Encoded-content detection.** A charset + entropy heuristic (`entropy.is_encoded`) flags
   content that is ~95% base64 characters with entropy in the ~4.5-6.5 range - i.e. base64ed
   ciphertext, whose entropy is too low to trip the entropy-jump or chi-square signals. It

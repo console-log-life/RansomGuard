@@ -212,6 +212,16 @@ def read_windows(
     return chunks or [b""]
 
 
+def _encoded_check(data: bytes, entropy_val: float) -> bool:
+    """is_encoded with the entropy already computed, to avoid recomputing it per window."""
+    if len(data) < 64:
+        return False
+    if not (config.ENCODED_ENTROPY_MIN <= entropy_val <= config.ENCODED_ENTROPY_MAX):
+        return False  # cheap numeric gate first, before the O(n) charset scan
+    in_alphabet = sum(1 for b in data if b in _BASE64_BYTES) / len(data)
+    return in_alphabet >= config.ENCODED_MIN_ALPHABET_FRAC
+
+
 def is_encoded(data: bytes) -> bool:
     """
     True if `data` looks like base64/encoded text rather than raw bytes or ciphertext.
@@ -223,11 +233,7 @@ def is_encoded(data: bytes) -> bool:
     """
     if len(data) < 64:
         return False
-    in_alphabet = sum(1 for b in data if b in _BASE64_BYTES) / len(data)
-    if in_alphabet < config.ENCODED_MIN_ALPHABET_FRAC:
-        return False
-    h = shannon_entropy(data)
-    return config.ENCODED_ENTROPY_MIN <= h <= config.ENCODED_ENTROPY_MAX
+    return _encoded_check(data, shannon_entropy(data))
 
 
 def looks_random(
@@ -262,12 +268,14 @@ def analyse_file(
     n = config.ENTROPY_WINDOWS if config.FEATURE_MULTI_OFFSET_ENTROPY else 1
     windows = read_windows(path, n, max_bytes)
 
-    # Pick the window with the highest entropy - the one an attacker could not leave plain.
-    best = max(windows, key=shannon_entropy)
-    entropy = shannon_entropy(best)
+    # Compute each window's entropy ONCE and reuse it (picking the max, and for the encoded
+    # check), instead of recomputing Shannon entropy several times per file.
+    entropies = [shannon_entropy(w) for w in windows]
+    best_i = max(range(len(windows)), key=entropies.__getitem__)
+    best, entropy = windows[best_i], entropies[best_i]
     chi = chi_square(best)
-    encoded = (
-        config.FEATURE_ENCODED_DETECTION and any(is_encoded(w) for w in windows)
+    encoded = config.FEATURE_ENCODED_DETECTION and any(
+        _encoded_check(w, h) for w, h in zip(windows, entropies)
     )
     return FileSignals(
         path=path,

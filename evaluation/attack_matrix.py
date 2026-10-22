@@ -56,7 +56,12 @@ def _text_corpus() -> None:
 
 
 MODES = ["full", "slow", "no-rename", "base64", "intermittent"]
-MODE_DELAY = {"full": 0.1, "slow": 1.0, "no-rename": 0.15, "base64": 0.15, "intermittent": 0.15}
+# Per-file delay for the LIVE operational run. A 6-file text attack at ~0.1 s finishes in
+# under a second - before a PID can be attributed - so almost every cell showed no_kill.
+# These slower rates give the attribution/kill path time to fire (slow stays slowest). The
+# efficacy columns (detected? / would-old-catch?) come from the delay-0 offline replay and
+# are unaffected by this.
+MODE_DELAY = {"full": 0.5, "slow": 1.5, "no-rename": 0.5, "base64": 0.5, "intermittent": 0.5}
 
 
 @dataclass
