@@ -15,6 +15,18 @@ lost, files restored, false positives) and not just a demo.
 > `./sandbox/protected`, and its AES key is always saved to `./sandbox/sim_key.bin` so
 > every file it encrypts can be decrypted again.
 
+## Two-minute demo
+
+```bash
+pip install -r requirements.txt
+python tools/make_test_files.py --clean        # build a safe test corpus in ./sandbox
+python demo_entropy.py                          # why entropy alone is not enough
+python -m ransomguard.monitor --enforce --duration 30   # terminal 1: the detector
+python -m simulator.fake_ransomware --delay 0.3         # terminal 2: the attack
+# watch terminal 1: ALERT -> culprit -> suspend -> recovery -> kill, folder restored
+python -m pytest tests -q                       # 67 tests
+```
+
 ## Status
 
 | Phase | Contents | State |
@@ -25,7 +37,11 @@ lost, files restored, false positives) and not just a demo.
 | 4 | process monitor + responder (suspend/kill) | done |
 | 5 | backup + hash-verified recovery | done |
 | 6 | evaluation runs, results table, charts | done |
-| 7 | Streamlit dashboard, README polish | planned |
+| 7 | Streamlit dashboard | done |
+
+All 67 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
+Python and also runs on Ubuntu. The one platform-specific area is process attribution -
+see **Known limitations** for the measured Windows behaviour and how it is handled.
 
 ## Setup
 
@@ -140,23 +156,44 @@ three PNG charts (`encrypted_vs_restored.png`, `detection_time.png`,
 `recovery_vs_false_positives.png`). The results directory is git-ignored; regenerate it
 with the two commands above.
 
+## Run (phase 7: live dashboard)
+
+```bash
+# terminal 1 - enforcing monitor
+python -m ransomguard.monitor --enforce
+
+# terminal 2 - the Streamlit dashboard (opens in your browser)
+streamlit run dashboard/app.py
+
+# terminal 3 - launch the attack and watch the dashboard react
+python -m simulator.fake_ransomware --delay 0.3 --order alphabetical
+```
+
+The dashboard reads only `./sandbox/events.jsonl` - it never touches the sandbox or the
+detector, so it is safe to leave running. It shows the live suspicion score vs. the
+threshold, the alert and the response taken (culprit PID, suspend, kill), how many files
+were encrypted and how many were restored, the canary status, a score-over-time chart and a
+scrolling feed of file events with the signals that fired. It auto-refreshes every 2 s.
+
 ### Results (one representative full run, 10 attack + 3 benign trials)
 
 | metric | value |
 |--------|-------|
-| attacks attributed + killed | 9 / 10 (the 10th, at 0.05 s/file, finished before a PID could be attributed) |
-| detection time (attack start → suspended) | mean 1.52 s, min 0.41 s, max 3.64 s |
-| files encrypted before the attacker was stopped | mean 7.9 of 16, min 3, max 16 |
-| recovery rate (hash-verified) | **100%** on every trial, 0 failures |
+| attacks attributed + killed | 9 / 10 (the 0.05 s/file trial finished before a PID could be attributed) |
+| detection time (attack start → suspended) | mean 1.63 s, min 0.59 s, max 3.17 s |
+| files encrypted before the attacker was stopped | mean 7.6 of 16, min 2, max 16 |
+| **folder fully clean at end (ground truth)** | **10 / 10 trials**, 0 leftover `.locked`, 0 failures |
 | false positives on benign work | **0** across 3 runs |
 | wrongful kills on benign work | **0** |
 
-Read together: the detector stops a typical attack in ~1–2 seconds after a handful of
-files, and even when the attack is too fast to attribute a process, recovery still restores
-every file from the hash-verified backup. Meanwhile ordinary heavy work - editing
-documents, copying photos, zipping, writing a 2 MB gzip - raises no alarms. The numbers
-vary slightly run to run (live timing), so regenerate them with the commands above; the
-shape of the result is stable.
+The "folder fully clean" row is the honest one: the harness re-hashes every file against a
+snapshot taken *before* the attack, rather than trusting what recovery reported. It is 10/10
+because the monitor **re-arms** after each response and does a final recovery sweep, so even
+when attribution first kills the wrong writer, the ongoing attack trips the score again, the
+real attacker is identified on the next wave, and recovery restores everything from the
+hash-verified backup. Meanwhile ordinary heavy work - editing documents, copying photos,
+zipping, writing a 2 MB gzip - raises no alarms. Numbers vary slightly run to run (live
+timing); regenerate with the commands above, the shape is stable.
 
 Example output of `demo_entropy.py` (phase 1):
 

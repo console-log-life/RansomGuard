@@ -63,24 +63,25 @@ def test_benign_workload_refuses_outside_sandbox(tmp_path, capsys):
 def test_report_table_and_metrics():
     from evaluation import report
 
+    base = {"files_failed": 0, "recovery_rate": 1.0, "false_positives": 0, "wrongful_kills": 0}
     results = [
         {"kind": "attack", "label": "a", "order": "alphabetical", "delay": 0.2,
          "files_total": 16, "detection_time_s": 2.5, "attributed": True, "killed": True,
-         "files_encrypted": 10, "files_restored": 10, "files_failed": 0, "recovery_rate": 1.0,
-         "false_positives": 0, "wrongful_kills": 0},
+         "files_encrypted": 10, "files_restored": 10, "final_recovered": 16,
+         "final_clean": True, "leftover_locked": 0, **base},
         {"kind": "attack", "label": "b", "order": "random", "delay": 0.1,
          "files_total": 16, "detection_time_s": None, "attributed": False, "killed": False,
-         "files_encrypted": 16, "files_restored": 16, "files_failed": 0, "recovery_rate": 1.0,
-         "false_positives": 0, "wrongful_kills": 0},
+         "files_encrypted": 16, "files_restored": 16, "final_recovered": 16,
+         "final_clean": True, "leftover_locked": 0, **base},
         {"kind": "benign", "label": "benign-1", "order": "", "delay": 0.0,
          "files_total": 16, "detection_time_s": None, "attributed": False, "killed": False,
-         "files_encrypted": 0, "files_restored": 0, "files_failed": 0, "recovery_rate": 1.0,
-         "false_positives": 0, "wrongful_kills": 0},
+         "files_encrypted": 0, "files_restored": 0, "final_recovered": 16,
+         "final_clean": True, "leftover_locked": 0, **base},
     ]
     table = report.build_table(results)
     assert "Attack trials" in table
     assert "Benign trials" in table
-    assert "recovery rate: mean 100.0%" in table
+    assert "folder fully clean at end (ground truth): 2/2 trials" in table
     assert "0 false positives" in table
     # the unattributed trial renders detection time as a dash, not a crash
-    assert "| 2 | random | 0.1s | 16 | - | no | no | 16 | 16 | 100% |" in table
+    assert "| 2 | random | 0.1s | 16 | - | no | no | 16 | 16/16 | yes |" in table

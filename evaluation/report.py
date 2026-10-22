@@ -47,15 +47,17 @@ def build_table(results: list[dict]) -> str:
 
     lines.append("## Attack trials\n")
     lines.append("| # | order | delay | files | detection (s) | attributed | killed | "
-                 "encrypted | restored | recovery |")
+                 "encrypted | final recovered | folder clean |")
     lines.append("|---|-------|-------|-------|---------------|------------|--------|"
-                 "-----------|----------|----------|")
+                 "-----------|-----------------|--------------|")
     for i, r in enumerate(attacks, 1):
+        recovered = r.get("final_recovered", r["files_restored"])
+        clean = r.get("final_clean", r["files_restored"] == r["files_encrypted"])
         lines.append(
             f"| {i} | {r['order']} | {r['delay']}s | {r['files_total']} | "
             f"{_fmt(r['detection_time_s'])} | {'yes' if r['attributed'] else 'no'} | "
             f"{'yes' if r['killed'] else 'no'} | {r['files_encrypted']} | "
-            f"{r['files_restored']} | {int(r['recovery_rate'] * 100)}% |"
+            f"{recovered}/{r['files_total']} | {'yes' if clean else 'NO'} |"
         )
 
     det = [r["detection_time_s"] for r in attacks if r["detection_time_s"] is not None]
@@ -67,7 +69,11 @@ def build_table(results: list[dict]) -> str:
     if det:
         lines.append(f"- detection time: mean {mean(det):.2f}s, min {min(det):.2f}s, max {max(det):.2f}s")
     lines.append(f"- files encrypted before stop: mean {mean(enc):.1f}, min {min(enc)}, max {max(enc)}")
-    lines.append(f"- recovery rate: mean {mean(rate) * 100:.1f}% (hash-verified)")
+    lines.append(f"- recovery rate (recovery self-report): mean {mean(rate) * 100:.1f}%")
+    clean_count = sum(1 for r in attacks if r.get("final_clean"))
+    leftover = sum(r.get("leftover_locked", 0) for r in attacks)
+    lines.append(f"- **folder fully clean at end (ground truth): {clean_count}/{len(attacks)} trials**")
+    lines.append(f"- leftover .locked artifacts across all trials: {leftover}")
     total_failed = sum(r["files_failed"] for r in attacks)
     lines.append(f"- files that failed to restore: {total_failed}")
 

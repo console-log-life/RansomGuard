@@ -55,6 +55,11 @@ class TrialResult:
     files_restored: int = 0       # restored AND hash-verified against the manifest
     files_failed: int = 0
     recovery_rate: float = 1.0
+    # Ground-truth check of the FINAL folder, independent of what recovery reported: how
+    # many files match their clean hash, and whether any ransomware artifact survived.
+    final_recovered: int = 0
+    final_clean: bool = False
+    leftover_locked: int = 0
     false_positives: int = 0      # ALERT events during benign work (should be 0)
     wrongful_kills: int = 0       # kills during benign work (must be 0)
 
@@ -119,10 +124,21 @@ def _first(events, name, key=None, default=None):
     return default
 
 
+def _snapshot_hashes() -> dict[str, str]:
+    from ransomguard.baseline import sha256_file
+
+    return {
+        str(p.relative_to(config.PROTECTED_DIR)): sha256_file(p)
+        for p in config.PROTECTED_DIR.rglob("*")
+        if p.is_file()
+    }
+
+
 def run_attack_trial(order: str, delay: float, scale: int = 1) -> TrialResult:
     _fresh_corpus(scale)
     monitor = _start_monitor()
     files_total = len(monitor.baseline)
+    clean = _snapshot_hashes()  # ground truth: the folder exactly as it was before the attack
 
     sim_start = time.time()
     proc = subprocess.Popen(
@@ -158,6 +174,14 @@ def run_attack_trial(order: str, delay: float, scale: int = 1) -> TrialResult:
         result.detection_time_s = dt if dt >= 0 else None
     affected = result.files_encrypted
     result.recovery_rate = round(result.files_restored / affected, 3) if affected else 1.0
+
+    # Ground-truth verification: compare the final folder to the clean snapshot, instead of
+    # trusting what recovery reported. This catches the case where the response killed the
+    # wrong process and files stayed encrypted.
+    final = _snapshot_hashes()
+    result.final_recovered = sum(1 for k, h in clean.items() if final.get(k) == h)
+    result.leftover_locked = len(list(config.PROTECTED_DIR.rglob("*.locked")))
+    result.final_clean = (final == clean) and result.leftover_locked == 0
     return result
 
 

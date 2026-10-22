@@ -68,8 +68,9 @@ class RansomGuardMonitor:
         self.responder: Responder | None = (
             Responder(self.logger, self.proc_monitor) if enforce else None
         )
-        self._handled = False  # we act once per attack, then keep logging
+        self._handled = False  # one response in flight at a time (re-armed after each)
         self._alert_active = False  # pauses backup refresh during an attack
+        self._responded = False  # true once any response has run (for a final sweep)
 
         self.baseline: dict[str, baseline_mod.BaselineEntry] = {}
         self.canaries: dict[str, str] = {}
@@ -242,6 +243,7 @@ class RansomGuardMonitor:
         we just put back.
         """
         assert self.responder is not None
+        self._responded = True
         suspect = self._resolve_culprit()
         if suspect is None:
             self.logger.log(
@@ -249,6 +251,7 @@ class RansomGuardMonitor:
                 note="score crossed threshold but no process could be attributed",
             )
             self._recover()  # still try to repair the damage even if we cannot attribute
+            self._rearm()    # and stay armed in case the attack continues
             return
 
         self.logger.log(
@@ -267,6 +270,19 @@ class RansomGuardMonitor:
             "response_done", pid=resp.pid, name=resp.name,
             suspended=resp.suspended, killed=resp.killed, refused=resp.refused,
         )
+        # 4. A final recovery sweep, then re-arm. Attribution is a heuristic: if we killed
+        #    the wrong PID (another writer) the real attacker may still be encrypting, so a
+        #    single early response is not enough. Re-arming lets a continuing attack trip the
+        #    score again and be attributed afresh - on the next wave the real attacker is the
+        #    dominant writer - until the folder is actually clean.
+        self._recover()
+        self._rearm()
+
+    def _rearm(self) -> None:
+        """Reset the one-shot latch so an ongoing attack can trigger another response."""
+        self._handled = False
+        self._alert_active = False
+        self.scorer.reset(GLOBAL_ACTOR)
 
     def _recover(self) -> recovery.RecoveryResult:
         """Restore the folder from the hash-verified backup and log the outcome."""
@@ -297,6 +313,10 @@ class RansomGuardMonitor:
         if self._enforce_thread is not None:
             self._enforce_thread.join(timeout=15)
             self._enforce_thread = None
+        # Final recovery sweep: guarantees the folder is clean when monitoring ends, even if
+        # the last few files were encrypted after the previous response's recovery ran.
+        if self.enforce and self._responded:
+            self._recover()
         if self.proc_monitor is not None:
             self.proc_monitor.stop()
         self._stop_refresh.set()
