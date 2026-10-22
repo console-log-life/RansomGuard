@@ -49,6 +49,7 @@ NONCE_SIZE = 12  # 96-bit nonce is the standard size for AES-GCM
 # anything already encrypted. (The .backup folder is excluded by skipping the dir below.)
 SKIP_NAMES = {
     config.SIM_KEY_FILE.name,
+    config.BACKUP_KEY_FILE.name,
     config.BASELINE_FILE.name,
     config.CANARY_FILE.name,
     config.LOG_FILE.name,

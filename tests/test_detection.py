@@ -31,6 +31,8 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SANDBOX", sb)
     monkeypatch.setattr(config, "PROTECTED_DIR", protected)
     monkeypatch.setattr(config, "BACKUP_DIR", sb / ".backup")
+    monkeypatch.setattr(config, "MANIFEST_FILE", sb / ".backup" / "manifest.json")
+    monkeypatch.setattr(config, "BACKUP_KEY_FILE", sb / "backup_key.bin")
     monkeypatch.setattr(config, "BASELINE_FILE", sb / "baseline.json")
     monkeypatch.setattr(config, "CANARY_FILE", sb / "canaries.json")
     monkeypatch.setattr(config, "LOG_FILE", sb / "events.jsonl")

@@ -25,6 +25,11 @@ BASELINE_FILE: Path = SANDBOX / "baseline.json"
 MANIFEST_FILE: Path = BACKUP_DIR / "manifest.json"
 CANARY_FILE: Path = SANDBOX / "canaries.json"
 SIM_KEY_FILE: Path = SANDBOX / "sim_key.bin"  # simulator's AES key, so we can always undo
+# Key that protects the backup (AES-256-GCM) and signs the manifest (HMAC-SHA256). It lives
+# in a file inside the sandbox for this student project; IN A REAL DEPLOYMENT this key would
+# be held by the OS keystore / a TPM / an HSM, never on the same disk as the backup it
+# protects. Two independent subkeys are derived from it (see backup.py).
+BACKUP_KEY_FILE: Path = SANDBOX / "backup_key.bin"
 LOG_FILE: Path = SANDBOX / "events.jsonl"
 RESULTS_DIR: Path = PROJECT_ROOT / "evaluation" / "results"
 

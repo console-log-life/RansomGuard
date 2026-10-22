@@ -16,6 +16,7 @@ string) and whatever keyword fields the caller passes (path, score, pid, reason,
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import threading
@@ -24,6 +25,14 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config
+
+# Genesis hash for the first line: there is no previous line to point at.
+GENESIS_HASH = "0" * 64
+
+
+def _line_hash(line: str) -> str:
+    """SHA-256 of one serialized log line (without its trailing newline)."""
+    return hashlib.sha256(line.encode("utf-8")).hexdigest()
 
 
 class EventLogger:
@@ -35,6 +44,19 @@ class EventLogger:
         self.echo = echo
         self._lock = threading.Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Hash chain: each line carries the SHA-256 of the previous line, so any later edit
+        # to an earlier line breaks every hash after it (tamper-evident log). We seed from
+        # the existing file so appending across restarts keeps the chain intact.
+        self._prev_hash = self._last_hash_on_disk()
+
+    def _last_hash_on_disk(self) -> str:
+        if not self.path.exists():
+            return GENESIS_HASH
+        last = ""
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                last = line
+        return _line_hash(last) if last else GENESIS_HASH
 
     def log(self, event: str, **fields: object) -> dict[str, object]:
         """Write one event. Extra keyword args become JSON fields. Returns the record."""
@@ -46,10 +68,12 @@ class EventLogger:
         }
         record.update(fields)
 
-        line = json.dumps(record, default=str)
         with self._lock:
+            record["prev"] = self._prev_hash  # link to the previous line
+            line = json.dumps(record, default=str)
             with open(self.path, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+            self._prev_hash = _line_hash(line)
             if self.echo:
                 print(self._human(record), file=sys.stderr)
         return record
@@ -58,14 +82,40 @@ class EventLogger:
     def _human(record: dict[str, object]) -> str:
         """A compact one-line view for the console (the file keeps the full JSON)."""
         extras = " ".join(
-            f"{k}={v}" for k, v in record.items() if k not in {"ts", "iso", "event"}
+            f"{k}={v}" for k, v in record.items() if k not in {"ts", "iso", "event", "prev"}
         )
         return f"[{record['iso']}] {record['event']:<14} {extras}"
 
     def reset(self) -> None:
-        """Truncate the log. Used by the evaluation harness between trials."""
+        """Truncate the log and restart the hash chain. Used by the evaluation harness."""
         with self._lock:
             self.path.write_text("", encoding="utf-8")
+            self._prev_hash = GENESIS_HASH
+
+
+def verify_log(path: Path | None = None) -> tuple[bool, int]:
+    """
+    Verify the hash chain of a JSON-lines log.
+
+    Walks the file line by line: each line must carry a `prev` field equal to the SHA-256
+    of the line before it (the first points at the genesis hash). Returns (ok, bad_index):
+    ok=True means the chain is intact; otherwise bad_index is the 0-based line number where
+    the chain first breaks - i.e. the earliest line that was edited, inserted or removed.
+    """
+    path = Path(path) if path else config.LOG_FILE
+    if not path.exists():
+        return True, -1
+    prev = GENESIS_HASH
+    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    for i, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return False, i
+        if record.get("prev") != prev:
+            return False, i
+        prev = _line_hash(line)
+    return True, -1
 
 
 def read_events(path: Path | None = None) -> list[dict[str, object]]:

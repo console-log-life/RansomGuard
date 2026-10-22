@@ -264,6 +264,37 @@ a uniform one. With 256 buckets there are 255 degrees of freedom, so truly rando
 score near 255 while text scores in the tens of thousands. A *low* chi-square therefore
 means "this looks random" — hence the threshold name `CHI_SQUARE_RANDOM_MAX`.
 
+## Cryptographic protection of the backup, manifest and log
+
+The backup and the evidence are themselves hardened, so an attacker who reaches them cannot
+quietly defeat recovery:
+
+- **Encrypted backups (AES-256-GCM).** Every file in `./sandbox/.backup` is stored as
+  ciphertext, with its relative path bound in as GCM associated data (blobs cannot be
+  swapped between paths). Recovery decrypts and verifies the GCM tag *before* it will write
+  anything back; a forged or bit-flipped blob is refused.
+- **Signed manifest (HMAC-SHA256).** The manifest of clean hashes is signed. Recovery
+  verifies the signature first and refuses a tampered manifest outright - otherwise an
+  attacker could rewrite the "known-good" hashes and defeat verification.
+- **Hash-chained log.** Each line of `events.jsonl` carries the SHA-256 of the previous
+  line, so editing, inserting or deleting any earlier line breaks every hash after it.
+- **Key location.** The AES and HMAC keys are two domain-separated subkeys of one master
+  key in `./sandbox/backup_key.bin`. For this student project the key is a sandbox file; a
+  real deployment would hold it in an OS keystore / TPM / HSM, off the protected disk. This
+  is documented in `config.py` and `backup.py`, not hidden.
+
+```bash
+# the protections are exercised by the test suite:
+python -m pytest tests/test_crypto_protection.py -q
+
+# verify the live log chain at any time (True, -1 means intact):
+python -c "from ransomguard.logger import verify_log; print(verify_log())"
+
+# prove a tampered manifest is rejected: edit one hash digit in
+# sandbox/.backup/manifest.json, then:
+python -c "from ransomguard import backup; backup.load_manifest()"   # raises ManifestTampered
+```
+
 ## Known limitations
 
 - **PID attribution.** `watchdog` (inotify) reports *what* changed, never *who* changed

@@ -13,20 +13,78 @@ WHY : detection + killing only limits the damage; it does not give the files bac
       the baseline), and we NEVER refresh during an active alert, so ransomware output can
       never overwrite a good backup.
 
+CRYPTOGRAPHIC PROTECTION (so the backup itself resists tampering):
+  * Every backup file is stored as AES-256-GCM ciphertext, not a plain copy. The relative
+    path is bound in as GCM associated data, so a blob cannot be swapped between paths, and
+    the GCM tag detects any bit-flip. Recovery decrypts and verifies the tag before it will
+    restore anything.
+  * The manifest is signed with HMAC-SHA256. Recovery verifies the signature FIRST and
+    refuses to use a manifest that has been altered - otherwise an attacker could rewrite
+    the "known-good" hashes and defeat verification.
+  * The AES key and the HMAC key are two independent subkeys derived from one master key in
+    config.BACKUP_KEY_FILE. For this student project the master key is a file in the
+    sandbox; a real deployment would keep it in an OS keystore / TPM / HSM off the protected
+    disk. This is documented, not hidden.
+
 The backup lives inside the sandbox and is excluded from the watcher, the simulator and the
 baseline scan, so it is never itself treated as user data or attacked.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
-import shutil
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 from . import config, entropy
 from .baseline import sha256_file
+
+NONCE_SIZE = 12  # 96-bit nonce, the standard size for AES-GCM
+
+
+class ManifestTampered(Exception):
+    """Raised when the manifest's HMAC signature does not verify."""
+
+
+def load_or_create_key() -> bytes:
+    """Return the 32-byte master key, creating it on first use.
+
+    In production this comes from an OS keystore / TPM; here it is a sandbox file.
+    """
+    path = config.ensure_inside(config.BACKUP_KEY_FILE, config.SANDBOX)
+    if path.exists():
+        return path.read_bytes()
+    key = os.urandom(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(key)
+    return key
+
+
+def _subkeys(master: bytes) -> tuple[bytes, bytes]:
+    """Derive independent AES and HMAC keys from the master (domain-separated SHA-256)."""
+    aes_key = hashlib.sha256(master + b"ransomguard-backup-aes").digest()
+    hmac_key = hashlib.sha256(master + b"ransomguard-manifest-hmac").digest()
+    return aes_key, hmac_key
+
+
+def encrypt_blob(data: bytes, relpath: str, aes_key: bytes) -> bytes:
+    """AES-256-GCM encrypt `data`, binding `relpath` as associated data."""
+    nonce = os.urandom(NONCE_SIZE)
+    ct = AESGCM(aes_key).encrypt(nonce, data, relpath.encode("utf-8"))
+    return nonce + ct
+
+
+def decrypt_blob(blob: bytes, relpath: str, aes_key: bytes) -> bytes:
+    """Decrypt a backup blob, verifying the GCM tag and the bound path. Raises InvalidTag."""
+    nonce, ct = blob[:NONCE_SIZE], blob[NONCE_SIZE:]
+    return AESGCM(aes_key).decrypt(nonce, ct, relpath.encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -70,8 +128,11 @@ def build_backup(
     Called once at startup while the folder is clean. Overwrites any previous backup so a
     fresh run always starts from the current clean state.
     """
+    import shutil
+
     root = config.ensure_inside(root or config.PROTECTED_DIR)
     backup_dir = config.ensure_inside(backup_dir or config.BACKUP_DIR, config.SANDBOX)
+    aes_key, _ = _subkeys(load_or_create_key())
     if backup_dir.exists():
         shutil.rmtree(backup_dir)
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -83,28 +144,51 @@ def build_backup(
         relpath = _rel(path, root)
         dest = backup_copy_of(relpath, backup_dir)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, dest)
+        # Store the backup as AES-GCM ciphertext (manifest records the PLAINTEXT hash).
+        dest.write_bytes(encrypt_blob(path.read_bytes(), relpath, aes_key))
         manifest[relpath] = _scan(path)
 
     save_manifest(manifest, backup_dir)
     return manifest
 
 
+def _manifest_signing_bytes(payload: dict) -> bytes:
+    """Canonical bytes signed by the HMAC: the created-time + the files map, stable order."""
+    return json.dumps(
+        {"created": payload["created"], "files": payload["files"]},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def save_manifest(manifest: dict[str, ManifestEntry], backup_dir: Path | None = None) -> Path:
     backup_dir = backup_dir or config.BACKUP_DIR
     path = config.ensure_inside(backup_dir / config.MANIFEST_FILE.name, config.SANDBOX)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _, hmac_key = _subkeys(load_or_create_key())
     payload = {"created": time.time(), "files": {k: v.as_dict() for k, v in manifest.items()}}
+    payload["hmac"] = hmac.new(hmac_key, _manifest_signing_bytes(payload), hashlib.sha256).hexdigest()
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 
-def load_manifest(backup_dir: Path | None = None) -> dict[str, ManifestEntry]:
+def load_manifest(backup_dir: Path | None = None, verify: bool = True) -> dict[str, ManifestEntry]:
+    """
+    Load the manifest, verifying its HMAC signature first.
+
+    If `verify` is True (the default, always used by recovery) a missing or wrong signature
+    raises ManifestTampered - we refuse to trust hashes an attacker might have rewritten.
+    """
     backup_dir = backup_dir or config.BACKUP_DIR
     path = backup_dir / config.MANIFEST_FILE.name
     if not path.exists():
         return {}
-    raw = json.loads(path.read_text(encoding="utf-8")).get("files", {})
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if verify:
+        _, hmac_key = _subkeys(load_or_create_key())
+        expected = hmac.new(hmac_key, _manifest_signing_bytes(payload), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, payload.get("hmac", "")):
+            raise ManifestTampered(f"manifest HMAC mismatch at {path}")
+    raw = payload.get("files", {})
     return {
         k: ManifestEntry(v["sha256"], v["size"], v["entropy"], v["ext"]) for k, v in raw.items()
     }
@@ -150,6 +234,7 @@ def refresh_clean(
     root = config.ensure_inside(root or config.PROTECTED_DIR)
     backup_dir = config.ensure_inside(backup_dir or config.BACKUP_DIR, config.SANDBOX)
     manifest = load_manifest(backup_dir)
+    aes_key, _ = _subkeys(load_or_create_key())
 
     refreshed = 0
     for path in root.rglob("*"):
@@ -167,7 +252,7 @@ def refresh_clean(
             continue  # changed but suspicious: leave the known-good copy in place
         dest = backup_copy_of(relpath, backup_dir)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, dest)
+        dest.write_bytes(encrypt_blob(path.read_bytes(), relpath, aes_key))
         manifest[relpath] = _scan(path)
         refreshed += 1
 

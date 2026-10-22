@@ -31,6 +31,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PROTECTED_DIR", protected)
     monkeypatch.setattr(config, "BACKUP_DIR", sb / ".backup")
     monkeypatch.setattr(config, "MANIFEST_FILE", sb / ".backup" / "manifest.json")
+    monkeypatch.setattr(config, "BACKUP_KEY_FILE", sb / "backup_key.bin")
 
     (protected / "notes.txt").write_text("hello world " * 100, encoding="utf-8")
     (protected / "documents" / "report.pdf").write_bytes(b"%PDF-1.4\n" + b"body " * 300)
@@ -65,7 +66,12 @@ def test_refresh_folds_in_a_benign_edit(sandbox):
     (protected / "notes.txt").write_text("edited text " * 120, encoding="utf-8")
     n = backup_mod.refresh_clean(protected)
     assert n == 1
-    assert sha256_file(config.BACKUP_DIR / "notes.txt") == sha256_file(protected / "notes.txt")
+    # The backup is now ciphertext, so compare via the manifest hash and a decrypt.
+    manifest = backup_mod.load_manifest()
+    assert manifest["notes.txt"].sha256 == sha256_file(protected / "notes.txt")
+    aes_key, _ = backup_mod._subkeys(backup_mod.load_or_create_key())
+    blob = (config.BACKUP_DIR / "notes.txt").read_bytes()
+    assert backup_mod.decrypt_blob(blob, "notes.txt", aes_key) == (protected / "notes.txt").read_bytes()
 
 
 def test_refresh_skips_encrypted_file_and_during_alert(sandbox):

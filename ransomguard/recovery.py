@@ -19,8 +19,11 @@ recovery makes no assumption about how the files were damaged.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from cryptography.exceptions import InvalidTag
 
 from . import backup as backup_mod
 from . import config
@@ -33,12 +36,13 @@ class RecoveryResult:
     restored: int = 0          # files put back and hash-verified against the manifest
     failed: int = 0            # files we could not restore or that failed verification
     removed: int = 0           # ransomware artifacts (.locked etc.) deleted
+    manifest_ok: bool = True   # False if the manifest HMAC failed (we refuse to restore)
     details: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         return (
             f"affected={self.affected} restored={self.restored} "
-            f"failed={self.failed} removed_artifacts={self.removed}"
+            f"failed={self.failed} removed_artifacts={self.removed} manifest_ok={self.manifest_ok}"
         )
 
 
@@ -62,8 +66,18 @@ def recover(
     """
     root = config.ensure_inside(root or config.PROTECTED_DIR)
     backup_dir = config.ensure_inside(backup_dir or config.BACKUP_DIR, config.SANDBOX)
-    manifest = backup_mod.load_manifest(backup_dir)
     result = RecoveryResult()
+
+    # Verify the manifest signature BEFORE trusting a single hash in it. A tampered
+    # manifest is refused outright - we will not restore against attacker-chosen hashes.
+    try:
+        manifest = backup_mod.load_manifest(backup_dir)
+    except backup_mod.ManifestTampered as exc:
+        result.manifest_ok = False
+        result.details.append(f"refusing tampered manifest: {exc}")
+        return result
+
+    aes_key, _ = backup_mod._subkeys(backup_mod.load_or_create_key())
 
     # ---- 1. restore originals that were encrypted-in-place or deleted ----------------
     for relpath, entry in manifest.items():
@@ -84,16 +98,22 @@ def recover(
             result.details.append(f"no backup for {relpath}")
             continue
         try:
+            # Decrypt the backup blob and verify the GCM tag (and the path binding) BEFORE
+            # writing anything. A corrupted/forged blob raises InvalidTag and is not restored.
+            plaintext = backup_mod.decrypt_blob(source.read_bytes(), relpath, aes_key)
+        except (InvalidTag, ValueError) as exc:
+            result.failed += 1
+            result.details.append(f"backup blob failed GCM verify: {relpath} ({exc})")
+            continue
+        # Second check: the decrypted bytes must hash to exactly the manifest value.
+        if hashlib.sha256(plaintext).hexdigest() != entry.sha256:
+            result.failed += 1
+            result.details.append(f"decrypted hash mismatch: {relpath}")
+            continue
+        try:
             live.parent.mkdir(parents=True, exist_ok=True)
-            import shutil
-
-            shutil.copy2(source, live)
-            # Verify: the restored file must hash to exactly the manifest value.
-            if sha256_file(live) == entry.sha256:
-                result.restored += 1
-            else:
-                result.failed += 1
-                result.details.append(f"hash mismatch after restore: {relpath}")
+            live.write_bytes(plaintext)
+            result.restored += 1
         except OSError as exc:
             result.failed += 1
             result.details.append(f"restore failed {relpath}: {exc}")
