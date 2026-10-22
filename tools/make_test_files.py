@@ -150,8 +150,14 @@ def write_mp4(path: Path, size: int = 200_000) -> None:
     path.write_bytes(ftyp + os.urandom(size))
 
 
-def build_corpus(root: Path, scale: int, seed: int) -> list[Path]:
-    """Create the corpus under `root` and return the list of files written."""
+def build_corpus(root: Path, scale: int, seed: int, text_only: bool = False) -> list[Path]:
+    """Create the corpus under `root` and return the list of files written.
+
+    text_only builds a corpus of ONLY textual files (txt/csv/json, no magic bytes),
+    including a couple of large ones. This is the hard case for the detector: there are no
+    file headers to break, so the entropy/encoded signals have to do the work - which is
+    exactly what the attack-matrix uses to show the base64/intermittent evasions.
+    """
     rng = random.Random(seed)
     created: list[Path] = []
 
@@ -160,6 +166,21 @@ def build_corpus(root: Path, scale: int, seed: int) -> list[Path]:
         target.parent.mkdir(parents=True, exist_ok=True)
         builder(target)
         created.append(target)
+
+    if text_only:
+        # Every file is LARGE (> 2 sampling windows) and textual (no magic bytes). This is
+        # the hard case: there are no headers to break, and because each file spans several
+        # 64 KB windows, intermittent encryption can leave the first window plaintext and
+        # hide from single-window sampling - isolating the multi-offset and encoded signals.
+        for i in range(max(1, scale)):
+            suffix = "" if i == 0 else f"_{i + 1}"
+            make(f"documents/notes{suffix}.txt", lambda p: write_text(p, rng, paragraphs=400))
+            make(f"documents/essay{suffix}.txt", lambda p: write_text(p, rng, paragraphs=500))
+            make(f"documents/manual{suffix}.txt", lambda p: write_text(p, rng, paragraphs=700))
+            make(f"data/records{suffix}.csv", lambda p: write_csv(p, rng, rows=8000))
+            make(f"data/ledger{suffix}.csv", lambda p: write_csv(p, rng, rows=12000))
+            make(f"data/settings{suffix}.json", lambda p: write_json(p, rng, records=5000))
+        return created
 
     make("readme.txt", lambda p: write_text(p, rng, paragraphs=3))
 
@@ -188,6 +209,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scale", type=int, default=1, help="repeat the file set N times")
     parser.add_argument("--seed", type=int, default=1234, help="RNG seed (reproducibility)")
     parser.add_argument("--clean", action="store_true", help="delete the folder first")
+    parser.add_argument(
+        "--text-only", action="store_true",
+        help="generate only textual files (no magic bytes) incl. large ones - the hard case",
+    )
     args = parser.parse_args(argv)
 
     # Safety: refuse any target outside ./sandbox, even if the user typed it.
@@ -201,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
 
-    created = build_corpus(root, max(1, args.scale), args.seed)
+    created = build_corpus(root, max(1, args.scale), args.seed, text_only=args.text_only)
     total = sum(p.stat().st_size for p in created)
     print(f"created {len(created)} files ({total / 1024:.0f} KB) in {root}")
     return 0

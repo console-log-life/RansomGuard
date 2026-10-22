@@ -264,6 +264,64 @@ a uniform one. With 256 buckets there are 255 degrees of freedom, so truly rando
 score near 255 while text scores in the tens of thousands. A *low* chi-square therefore
 means "this looks random" — hence the threshold name `CHI_SQUARE_RANDOM_MAX`.
 
+## Smarter attacks and stronger detection
+
+The simulator has several modes, all still sandbox-only and fully reversible from the saved
+key (one self-describing container format, reversed by `simulator/undo.py`):
+
+| `--mode` | what it does | which signal it tries to dodge |
+|----------|--------------|-------------------------------|
+| `full` | AES-GCM the whole file, rename to `.locked` (the loud baseline) | none - trips everything |
+| `slow` | full encryption, but one file every ~1-2 s | burst detection and score decay |
+| `no-rename` | encrypt in place, keep the original name and extension | the suspicious-extension signal |
+| `base64` | base64-encode the ciphertext (entropy ~6, not ~8), in place | entropy-jump and low-chi-square |
+| `intermittent` | encrypt only some 64 KB blocks, leaving the first block plaintext | first-64 KB entropy sampling |
+
+Two detection upgrades (both toggleable via `config.FEATURE_*`, which is how the evaluation
+reproduces the "old" detector for the before/after comparison):
+
+- **Multi-offset entropy.** Instead of sampling only the first 64 KB, the detector samples
+  several windows across the file and keeps the most suspicious one. Partial/intermittent
+  encryption can no longer hide in an untouched region.
+- **Encoded-content detection.** A charset + entropy heuristic (`entropy.is_encoded`) flags
+  content that is ~95% base64 characters with entropy in the ~4.5-6.5 range - i.e. base64ed
+  ciphertext, whose entropy is too low to trip the entropy-jump or chi-square signals. It
+  only fires on a file that used to be ordinary low-entropy content, so a genuinely new
+  base64 file is not blamed.
+
+The magic-byte, canary and hash-mismatch signals (unchanged) catch `no-rename`: encrypting
+in place destroys a known file's header and changes its hash versus the baseline/manifest.
+
+```bash
+python -m simulator.fake_ransomware --mode intermittent --delay 0.15
+python -m simulator.fake_ransomware --mode base64 --delay 0.15
+python -m simulator.undo                      # reverses every mode
+
+# ablation + attack-matrix (attack modes x canaries on/off, old-vs-new detector):
+python -m evaluation.attack_matrix
+python -m evaluation.report                    # writes results.md + charts
+```
+
+The attack-matrix (committed in `evaluation/results/results.md`, with
+`old_vs_new_detection.png`) scores every mode with the old and the new signal set, run on a
+large **text-only** corpus (no magic bytes) so the entropy/encoded signals are what decide
+the result. Headline before/after, with **canaries off** (so the decoy signal cannot mask
+the comparison):
+
+| mode | new detector | old detector |
+|------|--------------|--------------|
+| full | caught | caught |
+| slow | caught | caught |
+| no-rename | caught | caught (entropy jump) |
+| **base64** | **caught** (encoded signal) | **MISSED** |
+| **intermittent** | **caught** (multi-offset) | **MISSED** |
+
+So the two upgrades newly catch exactly the two attacks designed to evade the original
+entropy/magic signals; `no-rename` was already caught by magic/entropy, and with canaries
+on every mode is caught. Recovery restored the folder to a byte-for-byte clean state in all
+10 matrix cells (ground truth), and `clean pre-sweep` shows several cells needed the final
+stop() recovery sweep to get there.
+
 ## Cryptographic protection of the backup, manifest and log
 
 The backup and the evidence are themselves hardened, so an attacker who reaches them cannot

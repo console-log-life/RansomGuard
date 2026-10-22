@@ -30,15 +30,31 @@ SIM_KEY_FILE: Path = SANDBOX / "sim_key.bin"  # simulator's AES key, so we can a
 # be held by the OS keystore / a TPM / an HSM, never on the same disk as the backup it
 # protects. Two independent subkeys are derived from it (see backup.py).
 BACKUP_KEY_FILE: Path = SANDBOX / "backup_key.bin"
+SIM_PID_FILE: Path = SANDBOX / "sim_pid.txt"   # simulator writes its real worker PID here
 LOG_FILE: Path = SANDBOX / "events.jsonl"
 RESULTS_DIR: Path = PROJECT_ROOT / "evaluation" / "results"
 
 # ---------------------------------------------------------------------------
 # Entropy / randomness thresholds
 # ---------------------------------------------------------------------------
-ENTROPY_SAMPLE_BYTES: int = 65536   # only read the first 64 KB of a file (fast enough live)
+ENTROPY_SAMPLE_BYTES: int = 65536   # size of one entropy sampling window (64 KB)
 HIGH_ENTROPY: float = 7.5           # >= this (out of 8.0) means "looks encrypted/compressed"
 ENTROPY_JUMP: float = 2.0           # a rise this large vs the baseline is suspicious
+
+# Multi-offset sampling (B2): sampling only the FIRST 64 KB misses attacks that leave the
+# start of the file alone (intermittent/partial encryption). We instead sample several
+# evenly-spaced windows and take the MOST suspicious (max entropy). FEATURE flag lets the
+# evaluation turn this off to reproduce the "old" detector for a before/after comparison.
+FEATURE_MULTI_OFFSET_ENTROPY: bool = True
+ENTROPY_WINDOWS: int = 6            # number of windows sampled across a file when enabled
+
+# Encoded-content detection (B2): ciphertext that has been base64-encoded has entropy ~6
+# (64-symbol alphabet), so it slips under HIGH_ENTROPY and the chi-square test. We detect it
+# by charset + entropy heuristic instead.
+FEATURE_ENCODED_DETECTION: bool = True
+ENCODED_MIN_ALPHABET_FRAC: float = 0.95  # fraction of bytes within the base64 alphabet
+ENCODED_ENTROPY_MIN: float = 4.5         # base64 of random data sits around 6.0 bits/byte
+ENCODED_ENTROPY_MAX: float = 6.5
 
 # Chi-square against a uniform distribution over 256 byte values has 255 degrees of
 # freedom, so *truly random* bytes score around 255 and almost never above ~500.
@@ -54,6 +70,7 @@ W_LOW_CHI_SQUARE: int = 10   # byte distribution became uniform
 W_CANARY: int = 60           # a canary/honey file was touched -> almost certainly malicious
 W_SUSPICIOUS_EXT: int = 15   # renamed to .locked/.enc/... or to an unknown new extension
 W_BURST: int = 20            # many modifications in a few seconds
+W_ENCODED: int = 30          # a previously-plain file now looks base64/encoded (B2)
 
 BACKUP_REFRESH_SEC: float = 10.0   # how often to refresh the backup with clean file edits
 SCORE_THRESHOLD: int = 70          # act (suspend + stop) at or above this score
@@ -120,6 +137,10 @@ ATTRIB_USE_OPEN_FILES: bool = False
 # ---------------------------------------------------------------------------
 # Canary files (phase 3)
 # ---------------------------------------------------------------------------
+# Master switch for canaries, used by the evaluation ablation (detection WITH vs WITHOUT
+# canaries) to show how much the other signals carry on their own.
+ENABLE_CANARIES: bool = True
+
 # "aaa_" names get hit first and "zzz_" names last by an alphabetical crawler, so
 # whichever order the simulator walks the folder in, it steps on one of them early.
 CANARY_NAMES: tuple[str, ...] = (

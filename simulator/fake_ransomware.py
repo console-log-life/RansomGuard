@@ -41,18 +41,33 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ransomguard import config  # noqa: E402
+from simulator import container  # noqa: E402
 
 LOCKED_SUFFIX = ".locked"
-NONCE_SIZE = 12  # 96-bit nonce is the standard size for AES-GCM
 
-# Files the simulator must never encrypt, even inside the sandbox: our own metadata and
-# anything already encrypted. (The .backup folder is excluded by skipping the dir below.)
+# How each --mode behaves. `rename` True -> write <name>.locked and delete the original;
+# False -> overwrite the file in place keeping its name and extension (stealthier).
+# `b64` base64-encodes the ciphertext so the result looks like text (entropy ~6, not ~8).
+# `intermittent` encrypts only some blocks, leaving the first block plaintext so a detector
+# that samples only the start of the file sees nothing.
+MODE_SPECS: dict[str, dict] = {
+    "full":         {"id": container.MODE_FULL,         "rename": True,  "b64": False, "intermittent": False},
+    "slow":         {"id": container.MODE_FULL,         "rename": True,  "b64": False, "intermittent": False},
+    "no-rename":    {"id": container.MODE_NO_RENAME,    "rename": False, "b64": False, "intermittent": False},
+    "base64":       {"id": container.MODE_BASE64,       "rename": False, "b64": True,  "intermittent": False},
+    "intermittent": {"id": container.MODE_INTERMITTENT, "rename": False, "b64": False, "intermittent": True},
+}
+
+# Files the simulator must never encrypt, even inside the sandbox: our own metadata and the
+# recovery keys. (The .backup folder is excluded by skipping the dir below.)
 SKIP_NAMES = {
     config.SIM_KEY_FILE.name,
     config.BACKUP_KEY_FILE.name,
     config.BASELINE_FILE.name,
     config.CANARY_FILE.name,
     config.LOG_FILE.name,
+    config.MANIFEST_FILE.name,
+    config.SIM_PID_FILE.name,
 }
 
 
@@ -80,6 +95,12 @@ def _collect_targets(root: Path, order: str) -> list[Path]:
             continue
         if path.name in SKIP_NAMES or path.suffix == LOCKED_SUFFIX:
             continue
+        # Skip anything we have already encrypted (in-place modes leave the name unchanged).
+        try:
+            if container.is_container(path.read_bytes()[: len(container.MAGIC)]):
+                continue
+        except OSError:
+            continue
         files.append(path)
 
     if order == "alphabetical":
@@ -90,27 +111,48 @@ def _collect_targets(root: Path, order: str) -> list[Path]:
     return files
 
 
-def _encrypt_file(path: Path, key: bytes) -> Path:
-    """
-    Encrypt one file in place: write <name>.locked, then delete the original.
+def _build_segments(plaintext: bytes, key: bytes, name: str, spec: dict, block_size: int):
+    """Turn a file's bytes into container segments according to the attack mode."""
+    if spec["intermittent"]:
+        # Split into blocks; encrypt only some of them and - crucially - leave the FIRST
+        # block plaintext, so a detector that samples only the start of the file sees
+        # ordinary content. Files that fit in one block are fully encrypted (nothing to hide).
+        blocks = [plaintext[i:i + block_size] for i in range(0, max(len(plaintext), 1), block_size)]
+        segments = []
+        for i, block in enumerate(blocks):
+            encrypt_this = (len(blocks) == 1) or (i % 2 == 1)  # skip block 0 when there are several
+            if encrypt_this:
+                segments.append(container.encrypt_segment(block, key, name, i, b64=False))
+            else:
+                segments.append((container.SEG_PLAIN, block))
+        return segments
+    # full / no-rename / base64: a single segment over the whole file.
+    return [container.encrypt_segment(plaintext, key, name, 0, b64=spec["b64"])]
 
-    On-disk format matches demo_entropy.py and undo.py:
-        [12-byte nonce][ciphertext + 16-byte GCM tag]
-    The original filename is stored as GCM associated data so undo can restore the exact
-    name and so the tag also authenticates it.
+
+def _transform_file(path: Path, key: bytes, mode: str, block_size: int) -> Path:
+    """
+    Encrypt one file according to `mode` and return the resulting path.
+
+    rename modes write <name>.locked and delete the original; in-place modes overwrite the
+    file keeping its name. Either way the content becomes a self-describing, fully
+    reversible container (see simulator/container.py).
     """
     config.ensure_inside(path)                   # defence in depth: never act outside sandbox
+    spec = MODE_SPECS[mode]
     plaintext = path.read_bytes()
-    nonce = os.urandom(NONCE_SIZE)
-    original_name = path.name.encode("utf-8")
-    ciphertext = AESGCM(key).encrypt(nonce, plaintext, original_name)
+    name = path.name
+    segments = _build_segments(plaintext, key, name, spec, block_size)
+    blob = container.pack(name, spec["id"], segments)
 
-    locked = config.ensure_inside(path.with_name(path.name + LOCKED_SUFFIX))
-    # Length-prefix the original name so undo can split header from ciphertext.
-    header = len(original_name).to_bytes(2, "big") + original_name
-    locked.write_bytes(header + nonce + ciphertext)
-    path.unlink()                                # delete original (inside sandbox only)
-    return locked
+    if spec["rename"]:
+        out = config.ensure_inside(path.with_name(name + LOCKED_SUFFIX))
+        out.write_bytes(blob)
+        path.unlink()                            # delete original (inside sandbox only)
+        return out
+    # in-place: overwrite, keep the same name/extension
+    path.write_bytes(blob)
+    return path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +169,14 @@ def main(argv: list[str] | None = None) -> int:
         help="traversal order (alphabetical hits the aaa_/zzz_ canaries early/late)",
     )
     parser.add_argument("--seed", type=int, default=None, help="seed for --order random")
+    parser.add_argument(
+        "--mode", choices=tuple(MODE_SPECS), default="full",
+        help="attack style: full | slow | no-rename | base64 | intermittent (all reversible)",
+    )
+    parser.add_argument(
+        "--block-size", type=int, default=config.ENTROPY_SAMPLE_BYTES,
+        help="block size for --mode intermittent (default 64 KB, aligns with the sampling window)",
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="list targets and exit without encrypting"
     )
@@ -147,8 +197,15 @@ def main(argv: list[str] | None = None) -> int:
         targets = targets[: args.count]
 
     pid = os.getpid()
+    # Record our real worker PID to a sandbox file so the evaluation can verify the monitor
+    # killed THIS process (stdout is unreliable through the venv launcher). Best-effort.
+    try:
+        config.ensure_inside(config.SIM_PID_FILE)
+        config.SIM_PID_FILE.write_text(str(pid), encoding="utf-8")
+    except (OSError, config.SandboxViolation):
+        pass
     print(f"[simulator] PID={pid} target={root}")
-    print(f"[simulator] {len(targets)} files, order={args.order}, delay={args.delay}s")
+    print(f"[simulator] {len(targets)} files, mode={args.mode}, order={args.order}, delay={args.delay}s")
 
     if args.dry_run:
         for path in targets:
@@ -168,14 +225,14 @@ def main(argv: list[str] | None = None) -> int:
     encrypted = 0
     for path in targets:
         try:
-            locked = _encrypt_file(path, key)
+            out = _transform_file(path, key, args.mode, args.block_size)
         except (OSError, config.SandboxViolation) as exc:
             # A file may already be gone (the detector could be deleting/restoring it);
             # skip it rather than crash, so the simulator stays realistic and robust.
             print(f"  skip {path.name}: {exc}")
             continue
         encrypted += 1
-        print(f"  locked {locked.relative_to(root)}")
+        print(f"  encrypted {out.relative_to(root)}")
         if args.delay > 0:
             time.sleep(args.delay)
 

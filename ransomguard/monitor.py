@@ -83,7 +83,8 @@ class RansomGuardMonitor:
     def prepare(self, rebuild: bool = True) -> None:
         """Deploy canaries and take the clean baseline BEFORE watching starts."""
         if rebuild:
-            self.canaries = canary_mod.deploy_canaries(self.root)
+            # Canaries can be disabled for the evaluation ablation (detection WITHOUT them).
+            self.canaries = canary_mod.deploy_canaries(self.root) if config.ENABLE_CANARIES else {}
             self.baseline = baseline_mod.build_baseline(self.root)
             baseline_mod.save_baseline(self.baseline)
             # Snapshot a clean, hash-verified backup now, while the folder is trusted.

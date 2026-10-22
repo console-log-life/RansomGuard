@@ -36,6 +36,59 @@ def load_results() -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_matrix() -> list[dict]:
+    path = config.RESULTS_DIR / "attack_matrix.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+def build_matrix_table(rows: list[dict]) -> str:
+    """Render the attack-mode x canary-ablation matrix, incl. the before/after column."""
+    lines = ["## Attack matrix (smart attacks vs. the detector)\n"]
+    lines.append("| mode | canaries | detected (new)? | would OLD detector catch? | "
+                 "detection (s) | encrypted | recovered | folder clean | clean pre-sweep | correct kill |")
+    lines.append("|------|----------|-----------------|---------------------------|"
+                 "---------------|-----------|-----------|--------------|-----------------|--------------|")
+    for r in rows:
+        det = "yes" if r["detected_new"] else "**NO**"
+        old = "yes" if r["would_old_catch"] else "**NO (new catch)**"
+        lines.append(
+            f"| {r['mode']} | {'on' if r['canaries'] else 'off'} | {det} | {old} | "
+            f"{_fmt(r['detection_time_s'])} | {r['files_encrypted']} | {r['files_recovered']} | "
+            f"{'yes' if r['folder_clean'] else 'NO'} | {'yes' if r['clean_before_sweep'] else 'no'} | "
+            f"{r['correct_kill']} |"
+        )
+    # The headline: attacks the new detector catches that the old one would have missed.
+    gained = [r for r in rows if r["detected_new"] and not r["would_old_catch"]]
+    lines.append(
+        f"\n**Before/after:** {len(gained)} of {len(rows)} attack cells are caught by the new "
+        f"detector but would have slipped past the original entropy/magic/canary detector"
+    )
+    for r in gained:
+        lines.append(f"- {r['mode']} (canaries {'on' if r['canaries'] else 'off'})")
+    clean = sum(1 for r in rows if r["folder_clean"])
+    lines.append(f"\n**Recovery:** folder fully clean in {clean}/{len(rows)} cells (ground truth).")
+    return "\n".join(lines)
+
+
+def chart_old_vs_new(rows: list[dict], out: Path) -> None:
+    """Grouped bars: would-old-catch vs detected-new, for the canaries-off ablation."""
+    cells = [r for r in rows if not r["canaries"]] or rows
+    if not cells:
+        return
+    labels = [r["mode"] for r in cells]
+    old = [1 if r["would_old_catch"] else 0 for r in cells]
+    new = [1 if r["detected_new"] else 0 for r in cells]
+    x = range(len(cells))
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.bar([i - 0.2 for i in x], old, width=0.4, label="old detector", color="#95a5a6")
+    ax.bar([i + 0.2 for i in x], new, width=0.4, label="new detector", color="#2980b9")
+    ax.set_xticks(list(x)); ax.set_xticklabels(labels)
+    ax.set_yticks([0, 1]); ax.set_yticklabels(["missed", "caught"])
+    ax.set_title("Detection by attack mode (canaries OFF): old vs new detector")
+    ax.legend()
+    fig.tight_layout(); fig.savefig(out, dpi=120); plt.close(fig)
+
+
 def _fmt(value, suffix="") -> str:
     return "-" if value is None else f"{value}{suffix}"
 
@@ -153,15 +206,21 @@ def chart_recovery_vs_fp(results: list[dict], out: Path) -> None:
 def main() -> int:
     results = load_results()
     table = build_table(results)
-    print("\n" + table + "\n")
+    matrix = load_matrix()
+    full = table
+    if matrix:
+        full = table + "\n\n" + build_matrix_table(matrix)
+    print("\n" + full + "\n")
 
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    (config.RESULTS_DIR / "results.md").write_text(table, encoding="utf-8")
+    (config.RESULTS_DIR / "results.md").write_text(full, encoding="utf-8")
 
     attacks = [r for r in results if r["kind"] == "attack"]
     chart_detection_and_encrypted(attacks, config.RESULTS_DIR / "encrypted_vs_restored.png")
     chart_detection_time(attacks, config.RESULTS_DIR / "detection_time.png")
     chart_recovery_vs_fp(results, config.RESULTS_DIR / "recovery_vs_false_positives.png")
+    if matrix:
+        chart_old_vs_new(matrix, config.RESULTS_DIR / "old_vs_new_detection.png")
 
     print(f"saved table  -> {config.RESULTS_DIR / 'results.md'}")
     print(f"saved charts -> {config.RESULTS_DIR}/*.png")

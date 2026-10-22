@@ -57,6 +57,14 @@ TEXTUAL_EXTS: frozenset[str] = frozenset(
 )
 
 
+# The 64 base64 symbols plus padding/newlines - used by the encoded-content heuristic.
+_BASE64_BYTES = frozenset(
+    (
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\r\n"
+    ).encode("ascii")
+)
+
+
 @dataclass(frozen=True)
 class FileSignals:
     """Everything entropy.py can say about one file, in one object."""
@@ -64,10 +72,11 @@ class FileSignals:
     path: Path
     size: int
     ext: str
-    entropy: float
+    entropy: float          # the most suspicious window's entropy (max across offsets)
     chi_square: float
     magic_ok: bool | None   # True = header fine, False = header broken, None = unknown type
     looks_random: bool
+    encoded: bool = False   # content looks base64/encoded (low-ish entropy, base64 charset)
 
     def as_dict(self) -> dict[str, object]:
         """Flat dict for the JSON baseline / event log."""
@@ -79,6 +88,7 @@ class FileSignals:
             "chi_square": round(self.chi_square, 2),
             "magic_ok": self.magic_ok,
             "looks_random": self.looks_random,
+            "encoded": self.encoded,
         }
 
 
@@ -172,6 +182,54 @@ def magic_bytes_ok(path: Path | str, data: bytes | None = None) -> bool | None:
     return any(data[offset:offset + len(magic)] == magic for offset, magic in signatures)
 
 
+def read_windows(
+    path: Path | str,
+    windows: int,
+    window: int = config.ENTROPY_SAMPLE_BYTES,
+) -> list[bytes]:
+    """
+    Read up to `windows` evenly-spaced chunks of `window` bytes across a file.
+
+    Sampling several offsets - not just the first 64 KB - is what catches intermittent /
+    partial encryption, where the start of the file is deliberately left untouched. For a
+    small file this returns a single chunk (the whole file).
+    """
+    path = Path(path)
+    size = path.stat().st_size
+    if windows <= 1 or size <= window:
+        return [read_sample(path, window)]
+
+    # Offsets start-of-file ... end-of-file, each the start of one window.
+    last_start = max(0, size - window)
+    offsets = sorted({int(i * last_start / (windows - 1)) for i in range(windows)})
+    chunks: list[bytes] = []
+    with open(path, "rb") as handle:
+        for off in offsets:
+            handle.seek(off)
+            data = handle.read(window)
+            if data:
+                chunks.append(data)
+    return chunks or [b""]
+
+
+def is_encoded(data: bytes) -> bool:
+    """
+    True if `data` looks like base64/encoded text rather than raw bytes or ciphertext.
+
+    Encrypted data base64-encoded has two tells at once: almost every byte is in the base64
+    alphabet, and the entropy sits around 6 bits/byte (a 64-symbol alphabet), below the ~8
+    of raw ciphertext. Plain English fails the entropy floor; raw ciphertext fails the
+    charset test; so the pair is a reasonably specific signature.
+    """
+    if len(data) < 64:
+        return False
+    in_alphabet = sum(1 for b in data if b in _BASE64_BYTES) / len(data)
+    if in_alphabet < config.ENCODED_MIN_ALPHABET_FRAC:
+        return False
+    h = shannon_entropy(data)
+    return config.ENCODED_ENTROPY_MIN <= h <= config.ENCODED_ENTROPY_MAX
+
+
 def looks_random(
     data: bytes,
     entropy: float | None = None,
@@ -192,17 +250,32 @@ def looks_random(
 def analyse_file(
     path: Path | str, max_bytes: int = config.ENTROPY_SAMPLE_BYTES
 ) -> FileSignals:
-    """Read a file once and return every signal we can derive from its bytes."""
+    """
+    Read a file and return every signal we can derive from its bytes.
+
+    With multi-offset sampling enabled we look at several windows and keep the MOST
+    suspicious one (highest entropy) for the entropy/chi/looks-random signals, so partial
+    encryption cannot hide in an untouched region. The magic-byte check always uses the
+    true start of the file, and the encoded check runs over any sampled window.
+    """
     path = Path(path)
-    data = read_sample(path, max_bytes)
-    entropy = shannon_entropy(data)
-    chi = chi_square(data)
+    n = config.ENTROPY_WINDOWS if config.FEATURE_MULTI_OFFSET_ENTROPY else 1
+    windows = read_windows(path, n, max_bytes)
+
+    # Pick the window with the highest entropy - the one an attacker could not leave plain.
+    best = max(windows, key=shannon_entropy)
+    entropy = shannon_entropy(best)
+    chi = chi_square(best)
+    encoded = (
+        config.FEATURE_ENCODED_DETECTION and any(is_encoded(w) for w in windows)
+    )
     return FileSignals(
         path=path,
         size=path.stat().st_size,
         ext=path.suffix.lower(),
         entropy=entropy,
         chi_square=chi,
-        magic_ok=magic_bytes_ok(path, data),
-        looks_random=looks_random(data, entropy, chi),
+        magic_ok=magic_bytes_ok(path, windows[0]),
+        looks_random=looks_random(best, entropy, chi),
+        encoded=encoded,
     )

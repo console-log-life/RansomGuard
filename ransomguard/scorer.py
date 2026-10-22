@@ -92,6 +92,17 @@ def evaluate_signals(
     if current.ext in config.SUSPICIOUS_EXTS:
         reasons.append(Reason("suspicious_ext", config.W_SUSPICIOUS_EXT, current.ext))
 
+    # Encoded content: a file that used to be ordinary (low-entropy) text now looks
+    # base64-encoded. This catches the base64 evasion, whose entropy (~6) is too low to
+    # trip the entropy-jump or low-chi-square signals. We require a baseline that was NOT
+    # already encoded, so a genuinely new base64 file is not blamed on its own.
+    if (
+        current.encoded
+        and baseline is not None
+        and baseline.entropy < config.HIGH_ENTROPY
+    ):
+        reasons.append(Reason("encoded", config.W_ENCODED, f"base64-like, was {baseline.entropy:.1f}"))
+
     return reasons
 
 
