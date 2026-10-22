@@ -175,6 +175,18 @@ threshold, the alert and the response taken (culprit PID, suspend, kill), how ma
 were encrypted and how many were restored, the canary status, a score-over-time chart and a
 scrolling feed of file events with the signals that fired. It auto-refreshes every 2 s.
 
+Everything on the dashboard is scoped to the **current run** (the events after the latest
+`startup`), so an earlier demo never bleeds into the chart or the counts. The score is
+decayed to "now" with the same half-life as the scorer, so it falls back after the attack
+stops; files encrypted/restored are summed over all recovery sweeps in the run; canaries
+are counted by unique decoy touched; and the status flips to **ATTACK STOPPED - folder
+restored** once the attacker is killed and recovery has run.
+
+> **Reset the demo.** The log is append-only, so start each demo from a clean slate:
+> `python tools/make_test_files.py --clean` rebuilds the corpus, and the next
+> `python -m ransomguard.monitor --enforce` writes a fresh `startup` the dashboard scopes
+> to. (To also clear history, delete `./sandbox/events.jsonl` before starting.)
+
 ### Results (one representative full run, 10 attack + 3 benign trials)
 
 | metric | value |

@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from ransomguard import config
 from ransomguard.logger import read_events
+from dashboard import view
 
 st.set_page_config(page_title="RansomGuard", page_icon="shield", layout="wide")
 
@@ -52,7 +53,10 @@ st.sidebar.write(f"Log file:\n`{config.LOG_FILE}`")
 if st.sidebar.button("Refresh now"):
     st.rerun()
 
-events = load()
+all_events = load()
+# Scope EVERYTHING to the current run: only events after the latest 'startup'. Without this
+# the dashboard mixes previous demos into the score chart and the counts.
+events = view.current_run(all_events)
 startup = by_event(events, "startup")
 alerts = by_event(events, "ALERT")
 fs_events = by_event(events, "fs_event")
@@ -76,26 +80,31 @@ if not events:
 last = events[-1]
 mode = "ENFORCING" if (startup and startup[-1].get("enforce")) else "log-only"
 watched = startup[-1].get("path", "?") if startup else "?"
-status = "UNDER ATTACK" if alerts else "clean"
+status_code = view.run_status(events)
 st.caption(f"mode: **{mode}**  |  watching: `{watched}`  |  last event: {last.get('iso','?')}")
 
 # --------------------------------------------------------------------- metrics
-current_score = fs_events[-1].get("score", 0) if fs_events else 0
-canary_total = startup[-1].get("canaries", 0) if startup else 0
-canary_hits = sum(1 for e in fs_events if e.get("canary"))
-affected = recoveries[-1].get("affected", 0) if recoveries else 0
-restored = recoveries[-1].get("restored", 0) if recoveries else 0
+current_score = view.decayed_score(events, now=time.time())  # decays after the attack stops
+total_canaries = view.canary_total(events)
+touched, intact = view.canary_status(events, total_canaries)
+affected, restored = view.recovery_totals(events)           # summed over the whole run
+
+status_label = {"clean": "clean", "attack": "UNDER ATTACK",
+                "stopped": "ATTACK STOPPED"}[status_code]
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Suspicion score", f"{current_score}", help=f"threshold = {config.SCORE_THRESHOLD}")
-c2.metric("Status", status)
+c2.metric("Status", status_label)
 c3.metric("Files encrypted", affected)
 c4.metric("Files restored", f"{restored}/{affected}" if affected else "0")
-c5.metric("Canaries", f"{canary_total - canary_hits}/{canary_total} intact")
+c5.metric("Canaries", f"{intact}/{total_canaries} intact")
 
-if alerts:
-    st.error(f"ALERT raised - score {alerts[-1].get('score')} - "
-             f"reasons: {', '.join(alerts[-1].get('reasons', []))}")
+if status_code == "stopped":
+    st.success("ATTACK STOPPED - folder restored from the hash-verified backup.")
+elif status_code == "attack":
+    latest_alert = alerts[-1] if alerts else {}
+    st.error(f"UNDER ATTACK - score {latest_alert.get('score')} - "
+             f"reasons: {', '.join(latest_alert.get('reasons', []))}")
 else:
     st.success("No alerts. Folder looks clean.")
 
@@ -112,9 +121,8 @@ with left:
         if kills:
             st.write(f"**Killed:** PID `{kills[-1].get('pid')}` ({kills[-1].get('name')})")
         if recoveries:
-            r = recoveries[-1]
-            st.write(f"**Recovered:** {r.get('restored')} restored, "
-                     f"{r.get('failed')} failed, {r.get('removed_artifacts')} artifacts removed")
+            st.write(f"**Recovered (this run):** {restored} of {affected} files restored "
+                     f"across {len(recoveries)} recovery sweep(s)")
     else:
         st.write("No response yet.")
 
