@@ -258,30 +258,45 @@ detector**. That is why the score combines several signals.
                                    |
                    file events     |      process stats
          watchdog  ---------->  monitor.py  <---------- process_monitor.py (psutil)
-                                   |                      write-rate per PID,
-                                   |                      open files in sandbox
+                                   |                   write volume per PID, correlated
+                                   |                   with sandbox activity; CURRENT-USER
+                                   |                   processes only, never matched by name
               +--------------------+--------------------+
               |                    |                    |
          entropy.py            canary.py           baseline.py
-      entropy, chi-square,  canary files touched?  startup entropy +
-      magic-byte check                             SHA-256 of every file
+   entropy + chi-square,   canary files touched?  startup entropy +
+   magic bytes, multi-offset                      SHA-256 of every file
+   windows, base64/encoded
+   detection, STRUCTURAL
+   validity (zip/png/gz/pdf/jpg)
               |                    |                    |
               +--------------------+--------------------+
                                    v
-                              scorer.py          weighted score per process,
-                                   |             decays by half every 30 s
+                              scorer.py       weighted score for sandbox activity
+                                   |          (one actor), decays by half every 30 s
                         score >= 70 (config)
                                    v
-                             responder.py        suspend -> log alert -> stop
+                             responder.py     1. SUSPEND the attacker (freeze damage)
                                    |
                                    v
-                             recovery.py         compare hashes against the
-                                   |             manifest, restore originals,
-                                   v             verify, remove .locked files
-                      backup.py  ./sandbox/.backup + manifest.json
+                             recovery.py      2. verify manifest HMAC, decrypt the
+                                   |             AES-GCM backup, restore + hash-verify,
+                                   |             remove .locked artifacts
+                                   v
+                             responder.py     3. KILL  ->  4. final sweep  ->  5. RE-ARM
+                                   |                        (loops back if the attack
+                                   |                         is still running)
+      backup.py  ./sandbox/.backup/  (AES-256-GCM encrypted copies, path bound as AAD)
+                 ./sandbox/.backup/manifest.json  (HMAC-SHA256 signed)
                                    |
                               logger.py  ->  events.jsonl  ->  dashboard / evaluation
+                                              (hash-chained, tamper-evident)
 ```
+
+Note the response **order**: the attacker is suspended *first*, files are recovered while it
+is frozen, and only then is it killed - after which the monitor re-arms, so a continuing
+attack is caught on the next wave. Scoring is per *sandbox activity*, not per process; the
+process monitor's job is only to decide **which** process to stop.
 
 ## The signals, and why each one is needed
 
