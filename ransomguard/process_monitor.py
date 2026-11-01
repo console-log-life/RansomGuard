@@ -93,6 +93,7 @@ class ProcessMonitor:
         self._last_sandbox_activity: float = 0.0               # last ts a sandbox file changed
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._kick = threading.Event()  # set by note_sandbox_activity to wake the sampler now
 
     def note_sandbox_activity(self, nbytes: int = 0, now: float | None = None) -> None:
         """
@@ -104,6 +105,7 @@ class ProcessMonitor:
         with self._lock:
             self._last_sandbox_activity = now
             self._sandbox_writes.append((now, max(0, int(nbytes))))
+        self._kick.set()  # wake the sampler immediately so write rates build up fast
 
     def _sandbox_volume(self, now: float, window: float) -> int:
         """Total bytes that appeared in the sandbox within the window."""
@@ -263,12 +265,22 @@ class ProcessMonitor:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            start = time.monotonic()
             try:
                 self._sample()
             except Exception:
                 # The sampler must never crash the detector; skip a bad pass.
                 pass
-            self._stop.wait(self.interval)
+            # Sample faster while the sandbox is actively changing; otherwise idle slowly.
+            hot = self._last_sandbox_activity > 0 and (
+                time.monotonic() - self._last_sandbox_activity) <= config.PROC_WINDOW_SEC
+            timeout = config.PROC_SAMPLE_INTERVAL_FAST if hot else self.interval
+            # Wake early if a sandbox write kicks us, but never spin faster than the floor.
+            self._kick.wait(timeout)
+            self._kick.clear()
+            gap = config.PROC_SAMPLE_MIN_GAP - (time.monotonic() - start)
+            if gap > 0:
+                self._stop.wait(gap)
 
     # ------------------------------------------------------------------ API
     def start(self) -> None:

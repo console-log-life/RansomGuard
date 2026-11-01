@@ -85,7 +85,13 @@ SUSPICIOUS_EXTS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 # Process monitor (phase 4)
 # ---------------------------------------------------------------------------
-PROC_SAMPLE_INTERVAL: float = 0.3     # seconds between psutil io_counters samples
+PROC_SAMPLE_INTERVAL: float = 0.3     # seconds between psutil io_counters samples (idle)
+# Faster attribution for fast attacks: while the sandbox is actively changing we sample more
+# often, and every sandbox write "kicks" the sampler awake immediately (bounded by a minimum
+# gap so it never busy-loops). This lets two write-rate samples accumulate - and the attacker
+# be attributed - before a 0.05-0.2 s/file attack finishes.
+PROC_SAMPLE_INTERVAL_FAST: float = 0.1  # seconds between samples while the sandbox is hot
+PROC_SAMPLE_MIN_GAP: float = 0.05       # never sample faster than this (floor, avoids spin)
 PROC_WINDOW_SEC: float = 5.0          # how far back "recently active in sandbox" looks
 PROC_MIN_WRITE_RATE: int = 64 * 1024  # bytes/s below which a process is not a suspect
 

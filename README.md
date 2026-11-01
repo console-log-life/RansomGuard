@@ -454,12 +454,19 @@ python -c "from ransomguard import backup; backup.load_manifest()"   # raises Ma
   the one place names are used (to *protect*, never to *accuse*). Because the venv's
   `python.exe` is a launcher that re-spawns the real interpreter as a child, the attributed
   PID is that child — the same PID the simulator prints with `os.getpid()`.
-- **Detection-to-kill gap.** The monitor suspends the attacker as soon as it is attributed
-  (a few seconds after the first alert, once its write volume is unambiguous), then recovers
-  and kills. Some files are encrypted in that gap; they are not lost — recovery restores
-  them from the hash-verified backup, and across runs the folder comes back byte-for-byte
-  clean. If an attack finishes before attribution, recovery still restores 100%. Phase 6
-  measures the gap.
+- **Detection-to-kill gap, and why fast attacks are recovered rather than killed.** The
+  monitor suspends the attacker as soon as it is attributed, then recovers and kills. To
+  shorten the gap, the process sampler now wakes immediately on each sandbox write (a
+  "kick") and samples faster (0.1 s) while the sandbox is hot. Measured effect over the 10
+  trials: detection latency and mid-speed files-encrypted dropped slightly, but the **kill
+  rate did not reliably improve (≈7–8/10, run-to-run noise)**. The honest reason, confirmed
+  by a micro-benchmark: per-process `io_counters` on Windows updates too coarsely (~1 s) to
+  attribute a sub-second attack, and a 0.05 s/file attack (~0.8 s total) simply *exits*
+  before any user-space suspend can land. Faster sampling cannot beat that, because the
+  write-volume gate is wall-clock bound, not sample-count bound. The guarantee for those
+  attacks is **recovery, which restores 100 % (folder byte-for-byte clean in every trial)**;
+  actually killing a sub-second attacker needs the kernel-level file→PID attribution noted
+  above. This is a deliberate, measured trade-off, not a bug.
 - Entropy is measured on the first 64 KB only, so a file encrypted from the tail backwards
   would be missed by that one signal (the magic-byte and canary signals still fire).
 - The simulator mimics file behaviour only. Real ransomware also kills services, clears
