@@ -15,6 +15,35 @@ lost, files restored, false positives) and not just a demo.
 > `./sandbox/protected`, and its AES key is always saved to `./sandbox/sim_key.bin` so
 > every file it encrypts can be decrypted again.
 
+## Threat model
+
+**What RansomGuard defends against.** User-level crypto-ransomware: a program running with
+the current user's privileges that encrypts the user's local files. It covers the behaviours
+real families use and that our simulator reproduces: whole-file encryption, rename to a new
+extension (`.locked`), in-place encryption that keeps the original name, intermittent/partial
+encryption (only some blocks), base64-encoded ciphertext (low-entropy evasion), and
+deliberately slow drip encryption to dodge burst/rate signals.
+
+**Entry point is out of scope - and that is the point.** How the ransomware arrives -
+phishing attachment or macro, malicious download, an exploited vulnerability (e.g.
+WannaCry's SMB exploit), stolen/brute-forced RDP credentials, or a USB drive - is not what
+RansomGuard addresses. It is a **last line of defence that acts after execution**, on the
+file-system behaviour, regardless of how the attacker got in. In the demo, **launching the
+simulator stands in for a user opening a malicious file**; everything after that point is
+what we detect and recover from.
+
+**Explicitly out of scope:**
+- Locker ransomware (locks the screen/desktop but does not encrypt files).
+- Disk- or MBR-level encryptors (e.g. Petya-style) that work below the file system.
+- Kernel-level or SYSTEM/admin-level ransomware - such activity is still *detected and
+  recovered from*, but RansomGuard is a user-level tool and will not try to suspend or kill
+  a process it does not own (see **Known limitations**: that needs a kernel driver).
+- Data exfiltration / double-extortion (theft of data, not just encryption).
+
+Within scope, RansomGuard's job is narrow and measurable: notice the encryption fast,
+stop the responsible user-owned process, and restore every file from a hash-verified,
+cryptographically protected backup.
+
 ## Two-minute demo
 
 ```bash
@@ -24,7 +53,7 @@ python demo_entropy.py                          # why entropy alone is not enoug
 python -m ransomguard.monitor --enforce --duration 30   # terminal 1: the detector
 python -m simulator.fake_ransomware --delay 0.3         # terminal 2: the attack
 # watch terminal 1: ALERT -> culprit -> suspend -> recovery -> kill, folder restored
-python -m pytest tests -q                       # 67 tests
+python -m pytest tests -q                       # 97 tests
 ```
 
 ## Status
@@ -39,7 +68,7 @@ python -m pytest tests -q                       # 67 tests
 | 6 | evaluation runs, results table, charts | done |
 | 7 | Streamlit dashboard | done |
 
-All 67 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
+All 97 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
 Python and also runs on Ubuntu. The one platform-specific area is process attribution -
 see **Known limitations** for the measured Windows behaviour and how it is handled.
 
@@ -299,8 +328,9 @@ reproduces the "old" detector for the before/after comparison):
   `analyse_file` on a large (~2 MB) file about 6x slower (~8 ms -> ~50 ms per call after
   optimising it to compute each window's entropy once). Because analysis runs synchronously
   on every watchdog event, this extra per-event latency lets a fast attacker encrypt a
-  couple more files before the score crosses the threshold - across evaluation runs the
-  live kill rate moved from ~9/10 to ~8/10 and mean files-encrypted rose from ~7.6 to ~8-9.
+  few more files before the score crosses the threshold - it is one of the reasons the
+  slowest attacks are killed while the fastest finish first (currently 6/10 killed, mean
+  12.2/16 files encrypted; see `evaluation/results/results.md`).
   No files are lost (recovery still restores 10/10 to a clean folder); it is a
   detection-latency cost of looking harder, and the sampling (windows, not whole files)
   keeps it bounded.
