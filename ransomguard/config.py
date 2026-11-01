@@ -61,6 +61,12 @@ ENCODED_ENTROPY_MAX: float = 6.5
 # Text/CSV/JSON score in the tens of thousands. So a LOW chi-square = looks random.
 CHI_SQUARE_RANDOM_MAX: float = 500.0
 
+# Structural validity check (beats "header-kept" encryption): for structured types we verify
+# the file really parses (zip testzip, PNG CRCs, gzip decompress, PDF xref/%%EOF, JPG
+# trailer), not just that the magic bytes are present. Files larger than this are trusted on
+# their magic rather than fully parsed, to bound per-event latency.
+STRUCT_CHECK_MAX_BYTES: int = 25 * 1024 * 1024
+
 # ---------------------------------------------------------------------------
 # Score weights (used by scorer.py, phase 3+)
 # ---------------------------------------------------------------------------

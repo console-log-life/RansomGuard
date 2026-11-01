@@ -46,7 +46,7 @@ LABELED_DIR = config.PROJECT_ROOT / "datasets" / "labeled"
 
 # Benign (0) and ransomware (1) variants.
 BENIGN = ["original", "benign_zip", "benign_gzip"]
-RANSOM = ["enc_full", "enc_intermittent", "enc_base64"]
+RANSOM = ["enc_full", "enc_intermittent", "enc_base64", "enc_header_kept"]
 
 
 def _key(seed: int) -> bytes:
@@ -105,6 +105,9 @@ def _variant_bytes(variant: str, data: bytes, key: bytes, name: str) -> tuple[by
         return _enc_base64(data, key, name), name
     if variant == "enc_intermittent":
         return _enc_intermittent(data, key, name), name
+    if variant == "enc_header_kept":
+        # Keep the original header in the clear, encrypt the body - the magic bytes survive.
+        return container.make_header_kept(data, key, name), name
     raise ValueError(variant)
 
 

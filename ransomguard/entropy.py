@@ -18,7 +18,10 @@ This module is pure measurement: it never writes or deletes anything.
 
 from __future__ import annotations
 
+import gzip
 import math
+import zipfile
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +80,11 @@ class FileSignals:
     magic_ok: bool | None   # True = header fine, False = header broken, None = unknown type
     looks_random: bool
     encoded: bool = False   # content looks base64/encoded (low-ish entropy, base64 charset)
+    # Deeper than magic bytes: True = the file is STRUCTURALLY a valid instance of its type
+    # (zip opens+CRCs pass, PNG chunk CRCs verify, ...), False = header may look right but the
+    # structure is broken (e.g. header-kept encryption), None = no structural check for this
+    # type. This is what defeats the "keep the magic bytes" evasion.
+    structural_ok: bool | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Flat dict for the JSON baseline / event log."""
@@ -89,6 +97,7 @@ class FileSignals:
             "magic_ok": self.magic_ok,
             "looks_random": self.looks_random,
             "encoded": self.encoded,
+            "structural_ok": self.structural_ok,
         }
 
 
@@ -180,6 +189,70 @@ def magic_bytes_ok(path: Path | str, data: bytes | None = None) -> bool | None:
             data = handle.read(longest)
 
     return any(data[offset:offset + len(magic)] == magic for offset, magic in signatures)
+
+
+_ZIP_EXTS = frozenset({".zip", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".apk", ".jar"})
+
+
+def _png_structurally_ok(data: bytes) -> bool:
+    """Verify a PNG's chunk CRCs. A header-kept PNG keeps the signature but the IDAT CRCs
+    no longer match the (now encrypted) data."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return False
+    i, n = 8, len(data)
+    seen_end = False
+    while i + 12 <= n:
+        length = int.from_bytes(data[i:i + 4], "big")
+        if i + 12 + length > n:
+            return False
+        chunk = data[i + 4:i + 8 + length]           # type + data
+        crc = int.from_bytes(data[i + 8 + length:i + 12 + length], "big")
+        if (zlib.crc32(chunk) & 0xFFFFFFFF) != crc:
+            return False
+        if data[i + 4:i + 8] == b"IEND":
+            seen_end = True
+            break
+        i += 12 + length
+    return seen_end
+
+
+def structural_ok(path: Path, magic: bool | None) -> bool | None:
+    """
+    A deeper check than magic bytes: is the file a STRUCTURALLY valid instance of its type?
+
+    Returns True (verified valid), False (header may be intact but structure is broken), or
+    None (no cheap structural check for this type - trust the magic). Bounded by a size cap
+    so a huge valid file is trusted on its magic rather than fully parsed. This is what
+    catches "header-kept" encryption, which leaves the magic bytes but corrupts the body.
+    """
+    if magic is False:
+        return False            # header already broken; definitely not valid
+    if magic is None:
+        return None             # no signature for this type (txt/csv/json/...) - nothing to verify
+    ext = Path(path).suffix.lower()
+    try:
+        if path.stat().st_size > config.STRUCT_CHECK_MAX_BYTES:
+            return True         # too big to parse live; trust the (valid) magic
+        if ext in _ZIP_EXTS:
+            if not zipfile.is_zipfile(path):
+                return False
+            with zipfile.ZipFile(path) as zf:
+                return zf.testzip() is None           # None = every member's CRC passed
+        if ext == ".png":
+            return _png_structurally_ok(path.read_bytes())
+        if ext in (".gz", ".gzip", ".tgz"):
+            with gzip.open(path, "rb") as gz:
+                gz.read(1 << 20)                      # decompresses; raises if corrupt
+            return True
+        if ext == ".pdf":
+            tail = path.read_bytes()[-2048:]
+            return b"%%EOF" in tail and (b"startxref" in tail or b"xref" in tail)
+        if ext in (".jpg", ".jpeg"):
+            data = path.read_bytes()
+            return data[:3] == b"\xff\xd8\xff" and data.rstrip(b"\x00")[-2:] == b"\xff\xd9"
+    except Exception:
+        return False            # any parse error means the structure is broken
+    return True                 # valid magic, no deeper check available -> trust it
 
 
 def read_windows(
@@ -277,13 +350,15 @@ def analyse_file(
     encoded = config.FEATURE_ENCODED_DETECTION and any(
         _encoded_check(w, h) for w, h in zip(windows, entropies)
     )
+    magic = magic_bytes_ok(path, windows[0])
     return FileSignals(
         path=path,
         size=path.stat().st_size,
         ext=path.suffix.lower(),
         entropy=entropy,
         chi_square=chi,
-        magic_ok=magic_bytes_ok(path, windows[0]),
+        magic_ok=magic,
         looks_random=looks_random(best, entropy, chi),
         encoded=encoded,
+        structural_ok=structural_ok(path, magic),
     )

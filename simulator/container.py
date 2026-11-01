@@ -58,8 +58,6 @@ def _aad(name: str, index: int) -> bytes:
 
 def encrypt_segment(plaintext: bytes, key: bytes, name: str, index: int, b64: bool) -> tuple[int, bytes]:
     """Encrypt one chunk; return (seg_type, data) for the container."""
-    import os
-
     nonce = os.urandom(NONCE_SIZE)
     ct = AESGCM(key).encrypt(nonce, plaintext, _aad(name, index))
     blob = nonce + ct
@@ -87,6 +85,41 @@ def pack(original_name: str, mode: int, segments: list[tuple[int, bytes]]) -> by
 def is_container(blob: bytes) -> bool:
     """True if these bytes start with our container magic (so undo can find in-place ones)."""
     return blob[: len(MAGIC)] == MAGIC
+
+
+def make_header_kept(data: bytes, key: bytes, name: str, keep: int = HEADER_KEEP_DEFAULT) -> bytes:
+    """
+    Header-kept encryption: leave the first `keep` bytes (the file's magic/header) in the
+    clear and AES-GCM the rest, then append a FOOTER with the recovery metadata. The file
+    therefore still *starts* with its original header - a naive magic-byte check is fooled -
+    while the body is ciphertext. Reversible from the saved key via rebuild_header_kept.
+    """
+    keep = min(keep, len(data))
+    header, body = data[:keep], data[keep:]
+    nonce = os.urandom(NONCE_SIZE)
+    ct = AESGCM(key).encrypt(nonce, body, _aad(name, 0))
+    nb = name.encode("utf-8")
+    footer = nb + struct.pack(">IH", keep, len(nb)) + FOOTER_MAGIC
+    return header + nonce + ct + footer
+
+
+def is_header_kept(blob: bytes) -> bool:
+    """True if these bytes end with the header-kept footer magic."""
+    return len(blob) >= len(FOOTER_MAGIC) and blob[-len(FOOTER_MAGIC):] == FOOTER_MAGIC
+
+
+def rebuild_header_kept(blob: bytes, key: bytes) -> tuple[str, bytes]:
+    """Reverse make_header_kept -> (original_name, original_bytes). Raises on wrong key/tamper."""
+    if not is_header_kept(blob):
+        raise ValueError("not a header-kept container")
+    keep, name_len = struct.unpack(">IH", blob[-6 - len(FOOTER_MAGIC):-len(FOOTER_MAGIC)])
+    footer_len = name_len + 6 + len(FOOTER_MAGIC)
+    name = blob[-footer_len:-footer_len + name_len].decode("utf-8")
+    header = blob[:keep]
+    mid = blob[keep:len(blob) - footer_len]
+    nonce, ct = mid[:NONCE_SIZE], mid[NONCE_SIZE:]
+    body = AESGCM(key).decrypt(nonce, ct, _aad(name, 0))
+    return name, header + body
 
 
 def rebuild(blob: bytes, key: bytes) -> tuple[str, bytes]:

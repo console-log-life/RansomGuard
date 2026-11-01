@@ -51,11 +51,13 @@ LOCKED_SUFFIX = ".locked"
 # `intermittent` encrypts only some blocks, leaving the first block plaintext so a detector
 # that samples only the start of the file sees nothing.
 MODE_SPECS: dict[str, dict] = {
-    "full":         {"id": container.MODE_FULL,         "rename": True,  "b64": False, "intermittent": False},
-    "slow":         {"id": container.MODE_FULL,         "rename": True,  "b64": False, "intermittent": False},
-    "no-rename":    {"id": container.MODE_NO_RENAME,    "rename": False, "b64": False, "intermittent": False},
-    "base64":       {"id": container.MODE_BASE64,       "rename": False, "b64": True,  "intermittent": False},
-    "intermittent": {"id": container.MODE_INTERMITTENT, "rename": False, "b64": False, "intermittent": True},
+    "full":         {"id": container.MODE_FULL,         "rename": True,  "b64": False, "intermittent": False, "header_kept": False},
+    "slow":         {"id": container.MODE_FULL,         "rename": True,  "b64": False, "intermittent": False, "header_kept": False},
+    "no-rename":    {"id": container.MODE_NO_RENAME,    "rename": False, "b64": False, "intermittent": False, "header_kept": False},
+    "base64":       {"id": container.MODE_BASE64,       "rename": False, "b64": True,  "intermittent": False, "header_kept": False},
+    "intermittent": {"id": container.MODE_INTERMITTENT, "rename": False, "b64": False, "intermittent": True,  "header_kept": False},
+    # header-kept: keep the original magic/header in the clear, encrypt the body in place.
+    "header-kept":  {"id": container.MODE_HEADER_KEPT,  "rename": False, "b64": False, "intermittent": False, "header_kept": True},
 }
 
 # Files the simulator must never encrypt, even inside the sandbox: our own metadata and the
@@ -95,9 +97,11 @@ def _collect_targets(root: Path, order: str) -> list[Path]:
             continue
         if path.name in SKIP_NAMES or path.suffix == LOCKED_SUFFIX:
             continue
-        # Skip anything we have already encrypted (in-place modes leave the name unchanged).
+        # Skip anything we have already encrypted (in-place modes leave the name unchanged);
+        # header-kept files look normal at the start, so check the footer too.
         try:
-            if container.is_container(path.read_bytes()[: len(container.MAGIC)]):
+            raw = path.read_bytes()
+            if container.is_container(raw[: len(container.MAGIC)]) or container.is_header_kept(raw):
                 continue
         except OSError:
             continue
@@ -142,8 +146,10 @@ def _transform_file(path: Path, key: bytes, mode: str, block_size: int) -> Path:
     spec = MODE_SPECS[mode]
     plaintext = path.read_bytes()
     name = path.name
-    segments = _build_segments(plaintext, key, name, spec, block_size)
-    blob = container.pack(name, spec["id"], segments)
+    if spec["header_kept"]:
+        blob = container.make_header_kept(plaintext, key, name)
+    else:
+        blob = container.pack(name, spec["id"], _build_segments(plaintext, key, name, spec, block_size))
 
     if spec["rename"]:
         out = config.ensure_inside(path.with_name(name + LOCKED_SUFFIX))

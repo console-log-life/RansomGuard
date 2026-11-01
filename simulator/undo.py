@@ -35,7 +35,10 @@ def _restore_file(path: Path, key: bytes) -> Path:
     """Rebuild one container file to its original name and remove the encrypted copy."""
     config.ensure_inside(path)
     blob = path.read_bytes()
-    original_name, plaintext = container.rebuild(blob, key)
+    if container.is_header_kept(blob):          # header-kept footer marker at the END
+        original_name, plaintext = container.rebuild_header_kept(blob, key)
+    else:
+        original_name, plaintext = container.rebuild(blob, key)
     target = config.ensure_inside(path.with_name(original_name))
     target.write_bytes(plaintext)
     if path.resolve() != target.resolve():
@@ -44,13 +47,15 @@ def _restore_file(path: Path, key: bytes) -> Path:
 
 
 def _find_containers(root: Path) -> list[Path]:
-    """Every file under root whose bytes start with the sim container magic."""
+    """Every file under root that is one of our encrypted containers (leading magic, or the
+    header-kept footer marker at the end)."""
     found: list[Path] = []
     for path in sorted(root.rglob("*")):
         if path.is_dir() or config.BACKUP_DIR.resolve() in path.resolve().parents:
             continue
         try:
-            if container.is_container(path.read_bytes()[: len(container.MAGIC)]):
+            raw = path.read_bytes()
+            if container.is_container(raw[: len(container.MAGIC)]) or container.is_header_kept(raw):
                 found.append(path)
         except OSError:
             continue
