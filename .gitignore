@@ -4,6 +4,9 @@ __pycache__/
 .pytest_cache/
 sandbox/
 .local_notes/
+# Downloaded NapierOne sample and everything derived from it (large, regenerable, and not
+# ours to redistribute - rebuild with tools/fetch_napierone.py + evaluation/build_dataset.py).
+datasets/
 # evaluation/results/ is committed on purpose (charts + results.md are part of the report);
 # only the raw per-run JSON is regenerated each run and left untracked.
 evaluation/results/results.json
