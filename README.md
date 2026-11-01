@@ -67,8 +67,10 @@ python -m pytest tests -q                       # 97 tests
 | 5 | backup + hash-verified recovery | done |
 | 6 | evaluation runs, results table, charts | done |
 | 7 | Streamlit dashboard | done |
+| 8 | threat model, NapierOne real dataset, file-level classifier evaluation | done |
+| 9 | header-kept attack + structural-validity gate, dual-corpus evaluation | done |
 
-All 97 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
+All 111 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
 Python and also runs on Ubuntu. The one platform-specific area is process attribution -
 see **Known limitations** for the measured Windows behaviour and how it is handled.
 
@@ -164,13 +166,20 @@ the kill simply has nothing left to stop.
 ## Run (phase 6: evaluation - the numbers for the report)
 
 ```bash
-# run the trials (>=10 attack trials across speeds/orders + benign false-positive runs)
-python -m evaluation.run_experiment          # full matrix
-python -m evaluation.run_experiment --quick  # short smoke run
+# trials on the generated corpus (>=10 attack trials + benign false-positive runs)
+python -m evaluation.run_experiment --corpus synthetic
+python -m evaluation.attack_matrix  --corpus synthetic
 
-# render the markdown table + charts from the recorded results
+# the same on ~200 REAL files sampled from NapierOne (see "Dataset" below)
+python -m evaluation.run_experiment --corpus napierone
+python -m evaluation.attack_matrix  --corpus napierone
+
+# render the combined report (synthetic + NapierOne side by side) + charts
 python -m evaluation.report
 ```
+
+Run them **one at a time** - they all drive the same `./sandbox`, so a concurrent run would
+corrupt another's measurements.
 
 Each **attack trial** builds a fresh corpus, starts the enforcing monitor, runs the
 simulator at a given speed/order, and records four metrics: detection time (attack start ->
@@ -216,25 +225,33 @@ restored** once the attacker is killed and recovery has run.
 > `python -m ransomguard.monitor --enforce` writes a fresh `startup` the dashboard scopes
 > to. (To also clear history, delete `./sandbox/events.jsonl` before starting.)
 
-### Results (one representative full run, 10 attack + 3 benign trials)
+### Results: synthetic vs real NapierOne corpus
 
-| metric | value |
-|--------|-------|
-| attacks attributed / killed | 6 / 10 attributed, 6 / 10 killed (fast attacks finish before a kill; recovery still restores them) |
-| detection time (attack start → suspended) | mean 3.07 s, min 2.21 s, max 4.12 s |
-| files encrypted before the attacker was stopped | mean 12.2 of 16, min 7, max 16 |
-| **folder fully clean at end (ground truth)** | **10 / 10 trials**, 0 leftover `.locked`, 0 failures |
-| false positives on benign work | **0** across 3 runs |
-| wrongful kills on benign work | **0** |
+Both corpora, 10 attack + 3 benign trials each, plus a 10-cell attack matrix each
+(`evaluation/results/results.md`):
 
-The "folder fully clean" row is the honest one: the harness re-hashes every file against a
-snapshot taken *before* the attack, rather than trusting what recovery reported. It is 10/10
-because the monitor **re-arms** after each response and does a final recovery sweep, so even
-when attribution first kills the wrong writer, the ongoing attack trips the score again, the
-real attacker is identified on the next wave, and recovery restores everything from the
-hash-verified backup. Meanwhile ordinary heavy work - editing documents, copying photos,
-zipping, writing a 2 MB gzip - raises no alarms. Numbers vary slightly run to run (live
-timing); regenerate with the commands above, the shape is stable.
+| corpus | files | attacker killed | folder clean | detection | files encrypted | false positives | matrix clean | new catches vs old |
+|--------|-------|-----------------|--------------|-----------|-----------------|-----------------|--------------|--------------------|
+| synthetic | 16 | 8/10 | **10/10** | 1.59 s | 9.5 (59 %) | **0** | 10/10 | 2 |
+| **NapierOne (real)** | 204 | **10/10** | **10/10** | 2.28 s | 13.9 (**7 %**) | **0** | 10/10 | 0 |
+
+Reading it:
+
+- **On real files the detector does better, not worse.** With a realistic 204-file corpus
+  every attacker was attributed and killed (10/10) and only ~7 % of files were touched,
+  versus 59 % on the tiny 16-file synthetic set - a small corpus is simply consumed before
+  attribution can finish, which is an artefact of the test size, not of the detector.
+- **Folder fully clean 10/10 on both**, verified by re-hashing every file against a snapshot
+  taken *before* the attack (not by trusting what recovery reported). The monitor re-arms
+  after each response and does a final sweep, so even a mis-attributed first wave ends clean.
+- **Zero false positives on both** during benign work (editing documents, copying photos,
+  zipping, writing a 2 MB gzip).
+- **"New catches vs old" is 2 on synthetic and 0 on NapierOne** - and that is the honest
+  result, not a disappointment: real files carry magic bytes and structure that the original
+  detector already exploited, so the base64/intermittent evasions only beat it on the
+  text-only corpus. That hard case is exactly why the upgrades exist.
+
+Numbers vary slightly run to run (live timing); regenerate with the commands above.
 
 Example output of `demo_entropy.py` (phase 1):
 
@@ -427,6 +444,45 @@ python -c "from ransomguard.logger import verify_log; print(verify_log())"
 # sandbox/.backup/manifest.json, then:
 python -c "from ransomguard import backup; backup.load_manifest()"   # raises ManifestTampered
 ```
+
+## Dataset
+
+Beyond the generated corpus, the detector is evaluated on **real files** from **NapierOne**,
+a modern mixed-file data set built for exactly this kind of work.
+
+> Davies, S. R., Macfarlane, R., & Buchanan, W. J. (2022). *NapierOne: A modern mixed file
+> data set alternative to Govdocs1.* Forensic Science International: Digital Investigation,
+> 40, 301330.
+
+The data is fetched anonymously (unsigned, no AWS account) from the project's public bucket
+`s3://napierone.com`. It is **not redistributed here**: `datasets/` is git-ignored, and the
+sample is rebuilt locally from the authors' own copy. All credit and rights remain with the
+NapierOne authors; please cite them if you use it.
+
+**What we sample.** NapierOne stores one large ZIP *bundle* per file type rather than loose
+files, so the tool downloads the smallest bundle under a size cap and extracts a seeded
+random sample from it (skipping anything over 5 MB). With a 170 MB cap that gives **480
+files across 12 types** - JPG, PNG, MP3, MP4, MKV, PDF, DOCX, XLSX, TXT, CSV, JSON, HTML.
+The remaining types (ZIP, RAR, 7ZIP, GZIP, PPTX) have 303-625 MB bundles and are skipped by
+default; raise `--max-archive-mb` to include them.
+
+```bash
+pip install -r requirements.txt                      # boto3 for the unsigned S3 access
+python tools/fetch_napierone.py --count 40 --max-archive-mb 170   # -> datasets/napierone_sample/
+python evaluation/build_dataset.py                   # -> datasets/labeled/ + labels.csv
+python evaluation/dataset_eval.py                    # -> dataset_results.md + charts
+```
+
+`build_dataset.py` turns each source file into 7 labelled variants - benign (original, ZIP,
+GZIP) and ransomware (full, intermittent, base64, header-kept) - split 30/70 tuning/test
+**by source file**, so no file's variants straddle the split. That is 3360 labelled samples
+from 480 originals.
+
+**Future work: MLRan.** A natural next step is a comparison against a machine-learning
+baseline trained on behavioural traces - e.g. the **MLRan** dataset of ransomware API-call
+and registry behaviour. That would test a different detection axis (process behaviour
+sequences) than our file-content signals; it is out of scope here and listed only as future
+work.
 
 ## Known limitations
 

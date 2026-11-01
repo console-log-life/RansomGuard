@@ -29,16 +29,36 @@ import matplotlib.pyplot as plt  # noqa: E402
 from ransomguard import config  # noqa: E402
 
 
-def load_results() -> list[dict]:
-    path = config.RESULTS_DIR / "results.json"
+def load_results(suffix: str = "") -> list[dict]:
+    path = config.RESULTS_DIR / f"results{suffix}.json"
     if not path.exists():
+        if suffix:
+            return []
         raise SystemExit("no results.json - run `python -m evaluation.run_experiment` first")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_matrix() -> list[dict]:
-    path = config.RESULTS_DIR / "attack_matrix.json"
+def load_matrix(suffix: str = "") -> list[dict]:
+    path = config.RESULTS_DIR / f"attack_matrix{suffix}.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+def headline_row(name: str, results: list[dict], matrix: list[dict]) -> str:
+    """One row of the synthetic-vs-NapierOne summary table (the slide-ready numbers)."""
+    att = [r for r in results if r["kind"] == "attack"]
+    ben = [r for r in results if r["kind"] == "benign"]
+    dts = [r["detection_time_s"] for r in att if r["detection_time_s"] is not None]
+    n = len(att) or 1
+    killed = sum(1 for r in att if r["killed"])
+    clean = sum(1 for r in att if r.get("final_clean"))
+    enc = sum(r["files_encrypted"] for r in att) / n
+    total = att[0]["files_total"] if att else 0
+    fp = sum(r["false_positives"] for r in ben)
+    mat_clean = f"{sum(1 for r in matrix if r['folder_clean'])}/{len(matrix)}" if matrix else "-"
+    new_catch = sum(1 for r in matrix if r["detected_new"] and not r["would_old_catch"]) if matrix else 0
+    return (f"| {name} | {total} | {killed}/{n} | {clean}/{n} | "
+            f"{(sum(dts)/len(dts) if dts else 0):.2f} s | {enc:.1f} ({enc/total*100:.0f}%) | "
+            f"{fp} | {mat_clean} | {new_catch} |")
 
 
 def build_matrix_table(rows: list[dict]) -> str:
@@ -211,9 +231,32 @@ def main() -> int:
     results = load_results()
     table = build_table(results)
     matrix = load_matrix()
-    full = table
+    nap_results = load_results("_napierone")
+    nap_matrix = load_matrix("_napierone")
+
+    parts = []
+    # Slide-ready headline: synthetic vs real NapierOne files, side by side.
+    if nap_results:
+        parts.append(
+            "# Headline: synthetic vs real NapierOne corpus\n\n"
+            "| corpus | files | attacker killed | folder clean | detection | files encrypted "
+            "| false positives | matrix clean | new catches vs old |\n"
+            "|---|---|---|---|---|---|---|---|---|\n"
+            + headline_row("synthetic", results, matrix) + "\n"
+            + headline_row("NapierOne (real)", nap_results, nap_matrix) + "\n\n"
+            "*'new catches vs old' counts attack-matrix cells the upgraded detector catches "
+            "that the original would have missed. It is 0 on NapierOne because real files "
+            "carry magic bytes the old detector already used; the gap only shows on the "
+            "text-only corpus, which is the hard case.*\n"
+        )
+    parts.append("# Synthetic corpus\n\n" + table)
     if matrix:
-        full = table + "\n\n" + build_matrix_table(matrix)
+        parts.append(build_matrix_table(matrix))
+    if nap_results:
+        parts.append("# NapierOne corpus (real files)\n\n" + build_table(nap_results))
+        if nap_matrix:
+            parts.append(build_matrix_table(nap_matrix))
+    full = "\n\n".join(parts)
     print("\n" + full + "\n")
 
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)

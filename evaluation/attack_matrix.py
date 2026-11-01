@@ -45,10 +45,22 @@ from evaluation.run_experiment import (
 )
 
 
+CORPUS = "synthetic"
+
+
 def _text_corpus() -> None:
-    """A text-only corpus (no magic bytes) - the hard case that isolates the entropy/encoded
-    signals, so the before/after comparison is not masked by broken file headers."""
+    """The matrix corpus.
+
+    synthetic: a text-only corpus (no magic bytes) - the hard case that isolates the
+    entropy/encoded signals, so the before/after comparison is not masked by broken headers.
+    napierone: real files of mixed types, where the magic-byte and structural signals also
+    get to contribute (so the old detector looks stronger - which is the honest picture).
+    """
     _sweep_stray_simulators()
+    if CORPUS == "napierone":
+        from evaluation import run_experiment as rx
+        rx._napierone_corpus(n_files=60)
+        return
     subprocess.run(
         [PYTHON, "tools/make_test_files.py", "--clean", "--text-only"],
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
@@ -224,7 +236,13 @@ def run_cell(mode: str, canaries_on: bool) -> MatrixRow:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Attack-mode x canary-ablation matrix.")
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--corpus", choices=("synthetic", "napierone"), default="synthetic",
+                        help="text-only synthetic corpus, or real NapierOne files")
     args = parser.parse_args(argv)
+
+    global CORPUS
+    CORPUS = args.corpus
+    print(f"corpus: {CORPUS}")
 
     modes = ["full", "base64"] if args.quick else MODES
     canary_states = [True] if args.quick else [True, False]
@@ -240,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
 
     config.ENABLE_CANARIES = True  # restore default
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out = config.RESULTS_DIR / "attack_matrix.json"
+    suffix = "" if CORPUS == "synthetic" else f"_{CORPUS}"
+    out = config.RESULTS_DIR / f"attack_matrix{suffix}.json"
     out.write_text(json.dumps([asdict(r) for r in rows], indent=2), encoding="utf-8")
     print(f"\nwrote {len(rows)} matrix rows to {out}")
     print("render with:  python -m evaluation.report")

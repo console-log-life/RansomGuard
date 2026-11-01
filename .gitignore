@@ -9,5 +9,5 @@ sandbox/
 datasets/
 # evaluation/results/ is committed on purpose (charts + results.md are part of the report);
 # only the raw per-run JSON is regenerated each run and left untracked.
-evaluation/results/results.json
-evaluation/results/attack_matrix.json
+evaluation/results/results*.json
+evaluation/results/attack_matrix*.json

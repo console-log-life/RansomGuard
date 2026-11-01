@@ -99,8 +99,58 @@ def _sweep_stray_simulators() -> None:
                 pass
 
 
+# Which corpus the trials run against: the seeded synthetic one, or real NapierOne files.
+CORPUS = "synthetic"
+NAPIERONE_SAMPLE = config.PROJECT_ROOT / "datasets" / "napierone_sample"
+NAPIERONE_FILES = 200
+
+
+def _napierone_corpus(n_files: int = NAPIERONE_FILES, seed: int = 1234) -> None:
+    """Fill ./sandbox/protected with a stratified sample of REAL NapierOne files.
+
+    Copies only - the downloaded dataset itself is never modified by the attack. Falls back
+    with a clear error if the sample has not been fetched yet.
+    """
+    import csv as _csv
+    import random as _random
+    import shutil as _shutil
+
+    manifest = NAPIERONE_SAMPLE / "manifest.csv"
+    if not manifest.exists():
+        raise SystemExit(f"no NapierOne sample at {manifest} - run tools/fetch_napierone.py first")
+
+    rows = list(_csv.DictReader(manifest.open(encoding="utf-8")))
+    by_type: dict[str, list[dict]] = {}
+    for r in rows:
+        by_type.setdefault(r["type"], []).append(r)
+
+    # Round-robin across types so the corpus stays balanced, then trim to n_files.
+    rng = _random.Random(seed)
+    for lst in by_type.values():
+        rng.shuffle(lst)
+    picked: list[dict] = []
+    i = 0
+    while len(picked) < n_files and any(len(v) > i for v in by_type.values()):
+        for t in sorted(by_type):
+            if len(by_type[t]) > i and len(picked) < n_files:
+                picked.append(by_type[t][i])
+        i += 1
+
+    root = config.ensure_inside(config.PROTECTED_DIR)
+    if root.exists():
+        _shutil.rmtree(root)
+    root.mkdir(parents=True, exist_ok=True)
+    for r in picked:
+        dest = config.ensure_inside(root / r["path"], root)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _shutil.copy2(NAPIERONE_SAMPLE / r["path"], dest)
+
+
 def _fresh_corpus(scale: int = 1) -> None:
     _sweep_stray_simulators()
+    if CORPUS == "napierone":
+        _napierone_corpus()
+        return
     subprocess.run(
         [PYTHON, "tools/make_test_files.py", "--clean", "--scale", str(scale)],
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
@@ -213,7 +263,13 @@ def run_benign_trial(label: str, rounds: int = 2) -> TrialResult:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the RansomGuard evaluation trials.")
     parser.add_argument("--quick", action="store_true", help="short smoke run (4 trials)")
+    parser.add_argument("--corpus", choices=("synthetic", "napierone"), default="synthetic",
+                        help="synthetic generated corpus, or real NapierOne files")
     args = parser.parse_args(argv)
+
+    global CORPUS
+    CORPUS = args.corpus
+    print(f"corpus: {CORPUS}")
 
     if args.quick:
         attack_matrix = [("alphabetical", 0.2), ("random", 0.2)]
@@ -233,7 +289,9 @@ def main(argv: list[str] | None = None) -> int:
         results.append(run_benign_trial(label))
 
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out = config.RESULTS_DIR / "results.json"
+    # Keep the two corpora in separate files so the report can show them side by side.
+    suffix = "" if CORPUS == "synthetic" else f"_{CORPUS}"
+    out = config.RESULTS_DIR / f"results{suffix}.json"
     import json
 
     out.write_text(json.dumps([asdict(r) for r in results], indent=2), encoding="utf-8")
