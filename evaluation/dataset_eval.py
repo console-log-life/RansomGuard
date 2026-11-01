@@ -203,57 +203,94 @@ def chart_per_type_fpr(test: list[Scored], threshold: float, out: Path) -> None:
     fig.tight_layout(); fig.savefig(out, dpi=120); plt.close(fig)
 
 
-def main() -> int:
-    labels = LABELED_DIR / "labels.csv"
-    if not labels.exists():
-        raise SystemExit("no labels.csv - run `python evaluation/build_dataset.py` first")
-    rows = list(csv.DictReader(labels.open(encoding="utf-8")))
+def _split(scored, s):
+    return [x for x in scored if x.split == s]
+
+
+def evaluate_seed(seed: float):
+    """Rebuild the labeled split with `seed` and evaluate; return everything the report needs."""
+    from evaluation import build_dataset
+    build_dataset.build(int(seed), 0.3)
+    rows = list(csv.DictReader((LABELED_DIR / "labels.csv").open(encoding="utf-8")))
 
     new = analyse_all(rows, multi_offset=True, encoded=True)
     old = analyse_all(rows, multi_offset=False, encoded=False)
+    t_new = tune_threshold(_split(new, "tuning"))
+    t_old = tune_threshold(_split(old, "tuning"))
+    t_ent = tune_threshold(_split(new, "tuning"), key=lambda s: s.entropy)
+    test_new, test_old = _split(new, "test"), _split(old, "test")
+    return {
+        "seed": int(seed), "n": len(rows),
+        "n_tuning": len(_split(new, "tuning")), "n_test": len(test_new),
+        "t_new": t_new, "t_old": t_old, "t_ent": t_ent,
+        "test_new": test_new, "test_old": test_old,
+        "cm_new": confusion(test_new, t_new),
+        "cm_old": confusion(test_old, t_old),
+        "cm_ent": confusion(test_new, t_ent, key=lambda s: s.entropy),
+        "roc_comb": roc_auc(test_new),
+        "roc_ent": roc_auc(test_new, key=lambda s: s.entropy),
+    }
 
-    def split(scored, s):
-        return [x for x in scored if x.split == s]
 
-    # Tune on TUNING only, report on TEST.
-    t_new = tune_threshold(split(new, "tuning"))
-    t_old = tune_threshold(split(old, "tuning"))
-    t_ent = tune_threshold(split(new, "tuning"), key=lambda s: s.entropy)
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="File-level evaluation on the labeled dataset.")
+    ap.add_argument("--seed", type=int, default=2025, help="FRESH split seed (unbiased result)")
+    ap.add_argument("--compare-seed", type=int, default=1234, help="original split seed (comparison)")
+    args = ap.parse_args(argv)
 
-    test_new, test_old = split(new, "test"), split(old, "test")
-    cm_new = confusion(test_new, t_new)
-    cm_old = confusion(test_old, t_old)
-    cm_ent = confusion(test_new, t_ent, key=lambda s: s.entropy)
+    # Evaluate the ORIGINAL seed first, then the FRESH seed last so the dataset on disk ends
+    # on the fresh split (the one we report as the headline).
+    old_res = evaluate_seed(args.compare_seed)
+    fresh = evaluate_seed(args.seed)
 
-    roc_comb = roc_auc(test_new)
-    roc_ent = roc_auc(test_new, key=lambda s: s.entropy)
+    def headline(res):
+        return metrics(*res["cm_new"])
 
     lines: list[str] = ["# File-level evaluation on the NapierOne labeled dataset\n"]
-    lines.append(f"Samples: {len(rows)} ({sum(1 for r in rows if r['label']=='1')} ransomware / "
-                 f"{sum(1 for r in rows if r['label']=='0')} benign), split by source file "
-                 f"(tuning {len(split(new,'tuning'))} / test {len(test_new)}). Thresholds tuned on "
-                 f"tuning only.\n")
-    lines.append(f"Tuned thresholds: combined(new)={t_new}, combined(old)={t_old}, entropy-only={t_ent:.2f}\n")
+    lines.append(
+        "> **Avoiding test-set leakage.** The structural-validity gate (and the earlier "
+        "magic-byte gate) were designed *after* inspecting the first split "
+        f"(seed {args.compare_seed}). To report an unbiased number, the detector is frozen "
+        f"and the split is rebuilt with a FRESH seed ({args.seed}), assigned by source file. "
+        "The fresh-seed result below is the headline; the original seed is shown only for "
+        "comparison.\n")
 
-    lines.append("## Test-split headline\n")
-    lines += _md_metrics("NEW detector (combined, multi-offset + encoded)", metrics(*cm_new), cm_new)
-    lines += _md_metrics("OLD detector (combined, first-window only)", metrics(*cm_old), cm_old)
-    lines += _md_metrics("Entropy-only", metrics(*cm_ent), cm_ent)
-    lines.append(f"\nAUC (test): combined={roc_comb[2]:.3f}  vs  entropy-only={roc_ent[2]:.3f}\n")
+    lines.append(f"## FRESH split (seed {fresh['seed']}) - unbiased headline\n")
+    lines.append(f"Samples: {fresh['n']} (split by source file: tuning {fresh['n_tuning']} / "
+                 f"test {fresh['n_test']}). Thresholds tuned on tuning only "
+                 f"(combined={fresh['t_new']}, old={fresh['t_old']}, entropy-only={fresh['t_ent']:.2f}).\n")
+    lines += _md_metrics("NEW detector (structural gate + multi-offset + encoded)", headline(fresh), fresh["cm_new"])
+    lines += _md_metrics("OLD detector (first-window entropy, magic only)", metrics(*fresh["cm_old"]), fresh["cm_old"])
+    lines += _md_metrics("Entropy-only", metrics(*fresh["cm_ent"]), fresh["cm_ent"])
+    lines.append(f"\nAUC (test): combined={fresh['roc_comb'][2]:.3f} vs entropy-only={fresh['roc_ent'][2]:.3f}\n")
 
-    lines.append("## Per file type (test)\n")
-    lines += _per_group(test_new, t_new, "source_type")
-    lines.append("\n## Per variant (test)\n")
-    lines += _per_group(test_new, t_new, "variant")
+    lines.append("## Per file type - FRESH split (test)\n")
+    lines += _per_group(fresh["test_new"], fresh["t_new"], "source_type")
+    lines.append("\n## Per variant - FRESH split (test), incl. enc_header_kept\n")
+    lines += _per_group(fresh["test_new"], fresh["t_new"], "variant")
+    lines.append(
+        "\n*enc_header_kept is the hardest variant: it preserves the real magic bytes, so it "
+        "is caught only for types with a structural check (zip/docx/xlsx/pptx, png, gzip, "
+        "pdf, jpg). Media types (mp3/mp4/mkv) have no cheap structural check, so a header-kept "
+        "media file is trusted on its magic and evades - a known limitation that a real EDR "
+        "would close with format-aware parsers or kernel file->PID attribution.*")
+
+    om = headline(old_res)
+    lines.append(f"\n## Original split (seed {old_res['seed']}) - for comparison only\n")
+    lines += _md_metrics("NEW detector", om, old_res["cm_new"])
+    lines.append(f"\nAUC (test): combined={old_res['roc_comb'][2]:.3f} vs "
+                 f"entropy-only={old_res['roc_ent'][2]:.3f}\n")
 
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     (config.RESULTS_DIR / "dataset_results.md").write_text("\n".join(lines), encoding="utf-8")
-    chart_confusion(cm_new, config.RESULTS_DIR / "dataset_confusion.png")
-    chart_roc({"combined": roc_comb, "entropy-only": roc_ent}, config.RESULTS_DIR / "dataset_roc.png")
-    chart_per_type_fpr(test_new, t_new, config.RESULTS_DIR / "dataset_per_type_fpr.png")
+    chart_confusion(fresh["cm_new"], config.RESULTS_DIR / "dataset_confusion.png")
+    chart_roc({"combined": fresh["roc_comb"], "entropy-only": fresh["roc_ent"]},
+              config.RESULTS_DIR / "dataset_roc.png")
+    chart_per_type_fpr(fresh["test_new"], fresh["t_new"], config.RESULTS_DIR / "dataset_per_type_fpr.png")
 
     print("\n".join(lines))
-    print(f"\nsaved -> {config.RESULTS_DIR / 'dataset_results.md'} + 3 charts")
+    print(f"\nsaved -> {config.RESULTS_DIR / 'dataset_results.md'} + 3 charts (dataset left on fresh seed {fresh['seed']})")
     return 0
 
 
