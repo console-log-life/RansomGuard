@@ -66,8 +66,17 @@ def evaluate_signals(
             )
         return reasons
 
+    # A file that VALIDLY presents as its declared type explains its own high entropy: a
+    # well-formed .zip/.gz/.png/.jpg/.mp4 is supposed to look random, and that is exactly the
+    # benign hard-negative that makes an entropy-only detector cry wolf. Ransomware output
+    # either breaks the header (magic_ok False) or has no signature for its extension
+    # (magic_ok None), so we only let the entropy/chi signals fire when the magic is NOT
+    # intact. This cut the false-positive rate on benign archives sharply (see
+    # evaluation/results/dataset_results.md).
+    magic_intact = current.magic_ok is True
+
     # Entropy jump: content went from structured to random-looking vs the clean baseline.
-    if baseline is not None:
+    if baseline is not None and not magic_intact:
         rise = current.entropy - baseline.entropy
         if rise > config.ENTROPY_JUMP and current.entropy > config.HIGH_ENTROPY:
             reasons.append(
@@ -83,7 +92,9 @@ def evaluate_signals(
         reasons.append(Reason("magic_broken", config.W_MAGIC_BROKEN, f"{current.ext} header lost"))
 
     # Low chi-square: the byte distribution is near-uniform, i.e. looks random.
-    if current.chi_square <= config.CHI_SQUARE_RANDOM_MAX and current.entropy >= config.HIGH_ENTROPY:
+    if (not magic_intact
+            and current.chi_square <= config.CHI_SQUARE_RANDOM_MAX
+            and current.entropy >= config.HIGH_ENTROPY):
         reasons.append(
             Reason("low_chi_square", config.W_LOW_CHI_SQUARE, f"chi={current.chi_square:.0f}")
         )
