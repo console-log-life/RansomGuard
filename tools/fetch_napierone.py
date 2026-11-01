@@ -56,6 +56,14 @@ EXT_MAP: dict[str, set[str]] = {
     "TXT": {"txt"}, "CSV": {"csv"}, "JSON": {"json"}, "HTML": {"html", "htm"},
 }
 
+# For types with several bundle variants, prefer a REPRESENTATIVE one over the merely
+# smallest. JPG's smallest bundle is q001 (ultra-low quality -> low entropy, unrealistic);
+# real web photos ("from-web") or a normal quality (q075-q090) are the right high-entropy
+# hard-negative. We pick the smallest bundle (under the cap) whose name matches a pattern.
+PREFER: dict[str, tuple[str, ...]] = {
+    "JPG": ("from-web", "q090", "q080", "q075"),
+}
+
 OUT_DIR = config.PROJECT_ROOT / "datasets" / "napierone_sample"
 
 
@@ -66,15 +74,21 @@ def _client():
     )
 
 
-def _smallest_bundle(s3, type_name: str) -> tuple[str, int] | None:
-    """Return (key, size) of the smallest .zip bundle for a type, or None if there is none."""
+def _pick_bundle(s3, type_name: str, max_archive_bytes: int) -> tuple[str, int] | None:
+    """Pick the bundle to download: the smallest .zip UNDER the cap, preferring a
+    representative variant (see PREFER). None if nothing qualifies."""
     paginator = s3.get_paginator("list_objects_v2")
-    best: tuple[str, int] | None = None
+    bundles: list[tuple[str, int]] = []
     for page in paginator.paginate(Bucket=BUCKET, Prefix=f"{DATA_PREFIX}{type_name}/"):
         for obj in page.get("Contents", []):
-            if obj["Key"].lower().endswith(".zip") and (best is None or obj["Size"] < best[1]):
-                best = (obj["Key"], obj["Size"])
-    return best
+            if obj["Key"].lower().endswith(".zip") and obj["Size"] <= max_archive_bytes:
+                bundles.append((obj["Key"], obj["Size"]))
+    if not bundles:
+        return None
+    patterns = PREFER.get(type_name, ())
+    preferred = [b for b in bundles if any(p in b[0].lower() for p in patterns)]
+    pool = preferred or bundles
+    return min(pool, key=lambda b: b[1])
 
 
 def _sha256(data: bytes) -> str:
@@ -85,15 +99,11 @@ def fetch_type(s3, type_name: str, count: int, rng: random.Random,
                max_archive_bytes: int, max_file_bytes: int,
                out_dir: Path, cache_dir: Path, keep_archive: bool) -> list[dict]:
     """Download the smallest bundle for one type and extract up to `count` sample members."""
-    bundle = _smallest_bundle(s3, type_name)
+    bundle = _pick_bundle(s3, type_name, max_archive_bytes)
     if bundle is None:
-        print(f"  {type_name:6} skipped: no .zip bundle found")
+        print(f"  {type_name:6} skipped: no .zip bundle under cap {max_archive_bytes/1e6:.0f} MB")
         return []
     key, size = bundle
-    if size > max_archive_bytes:
-        print(f"  {type_name:6} skipped: smallest bundle {size/1e6:.0f} MB > cap "
-              f"{max_archive_bytes/1e6:.0f} MB ({key.split('/')[-1]})")
-        return []
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     local_zip = cache_dir / key.split("/")[-1]

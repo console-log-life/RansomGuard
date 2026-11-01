@@ -24,17 +24,27 @@ Rebuilding concatenates each segment's plaintext in order.
 from __future__ import annotations
 
 import base64
+import os
+import struct
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MAGIC = b"RGSIM1"
 NONCE_SIZE = 12
 
+# Header-kept variant: the file KEEPS its original first bytes (so its magic/header looks
+# valid) and encrypts only the body in place, with NO leading container header. The recovery
+# metadata lives in a FOOTER at the end instead, so the start of the file is untouched. This
+# is the attack designed to beat a naive "magic bytes intact -> trust it" check.
+FOOTER_MAGIC = b"RGSIMFT1"
+HEADER_KEEP_DEFAULT = 4096
+
 # Attack modes (stored in the mode byte, for information / undo reporting).
 MODE_FULL = 0
 MODE_INTERMITTENT = 1
 MODE_NO_RENAME = 2
 MODE_BASE64 = 3
+MODE_HEADER_KEPT = 4
 
 SEG_PLAIN = 0
 SEG_ENC = 1
