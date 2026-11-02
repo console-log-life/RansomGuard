@@ -107,7 +107,12 @@ def _variant_bytes(variant: str, data: bytes, key: bytes, name: str) -> tuple[by
         return _enc_intermittent(data, key, name), name
     if variant == "enc_header_kept":
         # Keep the original header in the clear, encrypt the body - the magic bytes survive.
-        return container.make_header_kept(data, key, name), name
+        # Scale `keep` to the file: with a flat 4 KB a small file would be kept almost whole
+        # (make_header_kept clamps keep to the file size), so "encrypted" samples would in
+        # fact be untouched and wrongly counted as ransomware. 10% keeps every sample
+        # genuinely encrypted while still preserving the header.
+        keep = max(16, min(container.HEADER_KEEP_DEFAULT, len(data) // 10))
+        return container.make_header_kept(data, key, name, keep=keep), name
     raise ValueError(variant)
 
 
