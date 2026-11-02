@@ -52,6 +52,10 @@ MAGIC_SIGNATURES: dict[str, tuple[tuple[int, bytes], ...]] = {
     ".mov": ((4, b"ftyp"),),
     ".gz": ((0, b"\x1f\x8b"),),
     ".mp3": ((0, b"ID3"), (0, b"\xff\xfb")),
+    # Matroska / WebM share the EBML signature.
+    ".mkv": ((0, b"\x1a\x45\xdf\xa3"),),
+    ".webm": ((0, b"\x1a\x45\xdf\xa3"),),
+    ".m4a": ((4, b"ftyp"),),
 }
 
 # Plain-text formats have no magic bytes at all, so there is nothing to verify.
@@ -216,6 +220,138 @@ def _png_structurally_ok(data: bytes) -> bool:
     return seen_end
 
 
+def _mp4_structurally_ok(data: bytes) -> bool:
+    """Walk the top-level ISO-BMFF boxes: they must chain exactly to EOF, start with 'ftyp',
+    and include both 'moov' and 'mdat'. Header-kept encryption leaves 'ftyp' but destroys the
+    box chain almost immediately."""
+    n, pos = len(data), 0
+    types: list[bytes] = []
+    while pos + 8 <= n:
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        btype = data[pos + 4:pos + 8]
+        header = 8
+        if size == 1:                                  # 64-bit extended size
+            if pos + 16 > n:
+                return False
+            size = int.from_bytes(data[pos + 8:pos + 16], "big")
+            header = 16
+        elif size == 0:                                # box runs to EOF
+            size = n - pos
+        if size < header or pos + size > n:
+            return False
+        if not btype.isalnum() and not btype.isalpha():
+            return False
+        types.append(btype)
+        pos += size
+    return pos == n and bool(types) and types[0] == b"ftyp" \
+        and b"moov" in types and b"mdat" in types
+
+
+def _ebml_vint(data: bytes, pos: int, mask_id: bool) -> tuple[int, int] | None:
+    """Read one EBML variable-length integer. Returns (value, bytes_consumed)."""
+    if pos >= len(data):
+        return None
+    first = data[pos]
+    if first == 0:
+        return None
+    length = 8 - first.bit_length() + 1
+    if length < 1 or length > 8 or pos + length > len(data):
+        return None
+    raw = data[pos:pos + length]
+    if mask_id:                                        # element IDs keep their marker bit
+        return int.from_bytes(raw, "big"), length
+    value = raw[0] & ((1 << (8 - length)) - 1)         # sizes strip the marker bit
+    for b in raw[1:]:
+        value = (value << 8) | b
+    return value, length
+
+
+def _mkv_structurally_ok(data: bytes) -> bool:
+    """Valid EBML header followed by a Segment element whose declared size fits the file."""
+    if data[:4] != b"\x1a\x45\xdf\xa3":
+        return False
+    hdr = _ebml_vint(data, 4, mask_id=False)           # EBML header payload size
+    if hdr is None:
+        return False
+    size, used = hdr
+    pos = 4 + used + size                              # skip the EBML header payload
+    eid = _ebml_vint(data, pos, mask_id=True)
+    if eid is None or eid[0] != 0x18538067:            # Segment
+        return False
+    pos += eid[1]
+    seg = _ebml_vint(data, pos, mask_id=False)
+    if seg is None:
+        return False
+    seg_size, seg_used = seg
+    unknown = seg_size >= (1 << (7 * seg_used)) - 1    # all-ones = streaming/unknown size
+    pos += seg_used
+    seg_end = len(data) if unknown else pos + seg_size
+    if seg_end > len(data):
+        return False
+
+    # Walk the Segment's top-level children. Checking only the Segment header is not enough:
+    # header-kept encryption preserves the first few KB (EBML header + Segment header), so
+    # the chain must be followed past that point, where the ciphertext breaks it.
+    children = 0
+    while pos < seg_end and children < 256:
+        cid = _ebml_vint(data, pos, mask_id=True)
+        if cid is None:
+            return False
+        csize = _ebml_vint(data, pos + cid[1], mask_id=False)
+        if csize is None:
+            return False
+        size_v, size_u = csize
+        if size_v >= (1 << (7 * size_u)) - 1:
+            return True                                # unknown-size child (streaming): accept
+        pos += cid[1] + size_u + size_v
+        if pos > seg_end:
+            return False
+        children += 1
+    return True
+
+
+_MP3_BITRATES_V1_L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
+_MP3_BITRATES_V2_L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0]
+_MP3_RATES = {3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000]}
+
+
+def _mp3_structurally_ok(data: bytes, frames_to_check: int = 12) -> bool:
+    """After any ID3 tag, frame-sync headers must keep appearing at the computed frame
+    lengths. Encrypting the body breaks the chain at the very first hop."""
+    pos = 0
+    if data[:3] == b"ID3" and len(data) >= 10:         # skip ID3v2 (syncsafe size)
+        size = 0
+        for b in data[6:10]:
+            size = (size << 7) | (b & 0x7F)
+        pos = 10 + size
+    checked = 0
+    while checked < frames_to_check:
+        if pos + 4 > len(data):
+            return checked > 0                         # ran out cleanly after real frames
+        if data[pos] != 0xFF or (data[pos + 1] & 0xE0) != 0xE0:
+            return False
+        ver = (data[pos + 1] >> 3) & 0x03
+        layer = (data[pos + 1] >> 1) & 0x03
+        br_i = (data[pos + 2] >> 4) & 0x0F
+        sr_i = (data[pos + 2] >> 2) & 0x03
+        pad = (data[pos + 2] >> 1) & 0x01
+        if ver == 1 or layer == 0 or br_i in (0, 15) or sr_i == 3:
+            return False
+        table = _MP3_BITRATES_V1_L3 if ver == 3 else _MP3_BITRATES_V2_L3
+        bitrate, rate = table[br_i] * 1000, _MP3_RATES[ver][sr_i]
+        if not bitrate or not rate:
+            return False
+        if layer == 3:                                 # Layer I
+            length = (12 * bitrate // rate + pad) * 4
+        else:                                          # Layer II / III
+            length = 144 * bitrate // rate + pad
+        if length <= 4:
+            return False
+        pos += length
+        checked += 1
+    return True
+
+
 def structural_ok(path: Path, magic: bool | None) -> bool | None:
     """
     A deeper check than magic bytes: is the file a STRUCTURALLY valid instance of its type?
@@ -250,6 +386,12 @@ def structural_ok(path: Path, magic: bool | None) -> bool | None:
         if ext in (".jpg", ".jpeg"):
             data = path.read_bytes()
             return data[:3] == b"\xff\xd8\xff" and data.rstrip(b"\x00")[-2:] == b"\xff\xd9"
+        if ext in (".mp4", ".mov", ".m4v", ".m4a"):
+            return _mp4_structurally_ok(path.read_bytes())
+        if ext in (".mkv", ".webm"):
+            return _mkv_structurally_ok(path.read_bytes())
+        if ext == ".mp3":
+            return _mp3_structurally_ok(path.read_bytes())
     except Exception:
         return False            # any parse error means the structure is broken
     return True                 # valid magic, no deeper check available -> trust it

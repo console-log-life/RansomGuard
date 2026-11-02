@@ -104,3 +104,66 @@ def test_scorer_flags_header_kept_but_not_valid_archive(tmp_path):
     hk_codes = {r.code for r in evaluate_signals(entropy.analyse_file(hk), base, canary_touched=False)}
     assert "entropy_jump" not in valid_codes          # valid archive: not flagged on entropy
     assert "entropy_jump" in hk_codes or "low_chi_square" in hk_codes  # header-kept: flagged
+
+
+# ------------------------------------------------- media structural checks (item 1)
+def _mp4_bytes(payload: bytes = b"\x00" * 2000) -> bytes:
+    """Minimal ISO-BMFF: ftyp + moov + mdat, sizes chaining exactly to EOF."""
+    def box(t, body):
+        return (len(body) + 8).to_bytes(4, "big") + t + body
+    return box(b"ftyp", b"isom\x00\x00\x02\x00isomiso2") + box(b"moov", b"\x00" * 64) + box(b"mdat", payload)
+
+
+def _mkv_bytes(payload_len: int = 2000) -> bytes:
+    """Minimal EBML: header + Segment whose children chain to the declared segment size."""
+    hdr_body = b"\x42\x86\x81\x01\x42\xf7\x81\x01"           # EBMLVersion, EBMLReadVersion
+    ebml = b"\x1a\x45\xdf\xa3" + bytes([0x80 | len(hdr_body)]) + hdr_body
+
+    info = b"\x15\x49\xa9\x66" + bytes([0x80 | 4]) + b"\x00" * 4          # Info
+    void = b"\xec" + bytes([0x80 | 0])                                    # empty Void
+    cluster = b"\x1f\x43\xb6\x75" + bytes([0x80 | 0])                     # empty Cluster
+    big = b"\xec" + bytes([0x40 | ((payload_len >> 8) & 0x3F), payload_len & 0xFF])
+    seg_body = info + void + cluster + big + b"\x00" * payload_len         # Void w/ 2-byte size
+
+    # Segment ID + an 8-byte size vint (0x01 marker + 7 size bytes)
+    seg_header = b"\x18\x53\x80\x67" + bytes([0x01]) + len(seg_body).to_bytes(7, "big")
+    return ebml + seg_header + seg_body
+
+
+def _mp3_bytes(frames: int = 20) -> bytes:
+    """Minimal MPEG1 Layer III stream: 128 kbps / 44.1 kHz -> 417-byte frames."""
+    header = b"\xff\xfb\x90\x00"
+    return (header + b"\x00" * (417 - 4)) * frames
+
+
+def test_mp4_structural_valid_and_header_kept_detected(tmp_path):
+    good = tmp_path / "a.mp4"
+    good.write_bytes(_mp4_bytes())
+    assert entropy.analyse_file(good).structural_ok is True
+
+    bad = tmp_path / "b.mp4"
+    bad.write_bytes(container.make_header_kept(_mp4_bytes(), _key(), "b.mp4", keep=64))
+    s = entropy.analyse_file(bad)
+    assert s.magic_ok is True and s.structural_ok is False   # ftyp kept, box chain broken
+
+
+def test_mkv_structural_valid_and_header_kept_detected(tmp_path):
+    good = tmp_path / "a.mkv"
+    good.write_bytes(_mkv_bytes())
+    assert entropy.analyse_file(good).structural_ok is True
+
+    bad = tmp_path / "b.mkv"
+    bad.write_bytes(container.make_header_kept(_mkv_bytes(), _key(), "b.mkv", keep=16))
+    s = entropy.analyse_file(bad)
+    assert s.magic_ok is True and s.structural_ok is False   # EBML sig kept, children broken
+
+
+def test_mp3_structural_valid_and_header_kept_detected(tmp_path):
+    good = tmp_path / "a.mp3"
+    good.write_bytes(_mp3_bytes())
+    assert entropy.analyse_file(good).structural_ok is True
+
+    bad = tmp_path / "b.mp3"
+    bad.write_bytes(container.make_header_kept(_mp3_bytes(), _key(), "b.mp3", keep=8))
+    s = entropy.analyse_file(bad)
+    assert s.structural_ok is False                          # frame-sync chain broken
