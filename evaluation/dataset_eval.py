@@ -148,6 +148,21 @@ def _md_metrics(name: str, m: dict[str, float], cm: tuple[int, int, int, int]) -
     ]
 
 
+def header_kept_by_type(test: list[Scored], threshold: float) -> list[str]:
+    """Recall of the enc_header_kept variant per file type - the variant the media
+    structural checks were added for, so it is reported on its own."""
+    groups: dict[str, list[Scored]] = {}
+    for s in test:
+        if s.variant == "enc_header_kept":
+            groups.setdefault(s.source_type, []).append(s)
+    lines = ["| source_type | n | header-kept recall |", "|---|---|---|"]
+    for g in sorted(groups):
+        gs = groups[g]
+        rec = sum(1 for s in gs if s.score >= threshold) / len(gs)
+        lines.append(f"| {g} | {len(gs)} | {rec:.3f} |")
+    return lines
+
+
 def _per_group(test: list[Scored], threshold: float, attr: str) -> list[str]:
     groups: dict[str, list[Scored]] = {}
     for s in test:
@@ -237,11 +252,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="File-level evaluation on the labeled dataset.")
     ap.add_argument("--seed", type=int, default=2025, help="FRESH split seed (unbiased result)")
     ap.add_argument("--compare-seed", type=int, default=1234, help="original split seed (comparison)")
+    ap.add_argument("--validate-seed", type=int, default=3031,
+                    help="second fresh seed, to validate changes made after seeing seed 2025")
     args = ap.parse_args(argv)
 
-    # Evaluate the ORIGINAL seed first, then the FRESH seed last so the dataset on disk ends
-    # on the fresh split (the one we report as the headline).
+    # Evaluate the comparison and validation seeds first, then the FRESH seed last so the
+    # dataset on disk ends on the headline split.
     old_res = evaluate_seed(args.compare_seed)
+    val_res = evaluate_seed(args.validate_seed)
     fresh = evaluate_seed(args.seed)
 
     def headline(res):
@@ -276,11 +294,45 @@ def main(argv: list[str] | None = None) -> int:
         "media file is trusted on its magic and evades - a known limitation that a real EDR "
         "would close with format-aware parsers or kernel file->PID attribution.*")
 
+    lines.append("\n## header-kept recall per file type - FRESH split (test)\n")
+    lines.append("The media structural checks (MP4/MKV/MP3) were added specifically for this "
+                 "variant. Before they existed, header-kept on MP3/MP4/MKV was undetectable "
+                 "(the magic bytes survive and there was no structural check), i.e. recall "
+                 "0.000 for those three types; PNG/JPG/PDF/zip-family were already covered.\n"
+                 "\nA second gap showed up once the media checks landed: for an "
+                 "already-compressed type (DOCX/XLSX) the structure was correctly found to be "
+                 "broken, but nothing scored it - magic_broken cannot fire (the header "
+                 "survives) and entropy cannot jump (the original was already ~8 bits/byte). "
+                 "The `structure_broken` signal (+25) scores that finding directly, which is "
+                 "what lifts DOCX 0.417 -> 1.000 and XLSX 0.185 -> 1.000. TXT stays lower "
+                 "because text has no structural check at all, so header-kept text is caught "
+                 "only when the encrypted remainder moves its entropy far enough.\n")
+    lines += header_kept_by_type(fresh["test_new"], fresh["t_new"])
+
     om = headline(old_res)
-    lines.append(f"\n## Original split (seed {old_res['seed']}) - for comparison only\n")
-    lines += _md_metrics("NEW detector", om, old_res["cm_new"])
-    lines.append(f"\nAUC (test): combined={old_res['roc_comb'][2]:.3f} vs "
-                 f"entropy-only={old_res['roc_ent'][2]:.3f}\n")
+    vm = headline(val_res)
+    lines.append(f"\n## Other splits (sanity / comparison)\n")
+    lines.append(f"- **Validation split (seed {val_res['seed']})** - a SECOND fresh seed, because the "
+                 f"media checks above were themselves added after looking at seed {fresh['seed']}: "
+                 f"precision={vm['precision']:.3f} recall={vm['recall']:.3f} F1={vm['f1']:.3f} "
+                 f"FPR={vm['fpr']:.3f} AUC={val_res['roc_comb'][2]:.3f}")
+    lines.append(f"- **Original split (seed {old_res['seed']})** - the split the gate was first "
+                 f"designed on, shown for comparison only: precision={om['precision']:.3f} "
+                 f"recall={om['recall']:.3f} F1={om['f1']:.3f} FPR={om['fpr']:.3f} "
+                 f"AUC={old_res['roc_comb'][2]:.3f}")
+
+    lines.append("\n## Notes on reading these numbers\n")
+    lines.append(
+        "1. **This threshold is not the live alert threshold.** Here a score is computed for "
+        "ONE file in isolation, and the tuned cut-off is a per-file value. The live monitor's "
+        "threshold of 70 is *accumulated* across many file events (plus canary, burst and "
+        "extension signals that do not exist in a single-file view), so the two numbers "
+        "measure different things and must not be compared.")
+    lines.append(
+        "2. **The benign archives are ours, not NapierOne's.** NapierOne's own ZIP/RAR/7ZIP/GZIP "
+        "bundles are 520-625 MB, over the download cap, so the high-entropy benign hard "
+        "negatives are ZIP and GZIP archives we create from the sampled NapierOne files. They "
+        "are still genuine, valid archives - just produced locally rather than downloaded.")
 
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     (config.RESULTS_DIR / "dataset_results.md").write_text("\n".join(lines), encoding="utf-8")

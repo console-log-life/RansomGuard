@@ -77,6 +77,11 @@ W_CANARY: int = 60           # a canary/honey file was touched -> almost certain
 W_SUSPICIOUS_EXT: int = 15   # renamed to .locked/.enc/... or to an unknown new extension
 W_BURST: int = 20            # many modifications in a few seconds
 W_ENCODED: int = 30          # a previously-plain file now looks base64/encoded (B2)
+# A file whose header is intact but whose STRUCTURE is broken (a .docx that no longer opens,
+# a .png whose CRCs fail). This is the header-kept tell: magic_broken cannot fire because the
+# header survives, and for already-compressed types entropy cannot jump either, so without
+# this the structural finding would be computed and never scored.
+W_STRUCTURE_BROKEN: int = 25
 
 BACKUP_REFRESH_SEC: float = 10.0   # how often to refresh the backup with clean file edits
 SCORE_THRESHOLD: int = 70          # act (suspend + stop) at or above this score

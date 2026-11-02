@@ -94,6 +94,15 @@ def evaluate_signals(
     if current.magic_ok is False:
         reasons.append(Reason("magic_broken", config.W_MAGIC_BROKEN, f"{current.ext} header lost"))
 
+    # Structure broken while the header survives: the file still claims to be a .docx/.png/
+    # .mp4 and its magic bytes are intact, but it no longer parses as one. That is evidence
+    # in its own right - and the only signal available against header-kept encryption of an
+    # already-compressed type, where neither magic_broken nor entropy_jump can fire.
+    elif current.structural_ok is False and current.magic_ok is True:
+        reasons.append(
+            Reason("structure_broken", config.W_STRUCTURE_BROKEN, f"{current.ext} does not parse")
+        )
+
     # Low chi-square: the byte distribution is near-uniform, i.e. looks random.
     if (not structurally_valid
             and current.chi_square <= config.CHI_SQUARE_RANDOM_MAX
