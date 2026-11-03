@@ -552,9 +552,13 @@ work.
 ransomguard/    detection engine (config, entropy, baseline, canary, process_monitor,
                 scorer, responder, backup, recovery, monitor, logger)
 simulator/      safe attack simulator + undo script
-tools/          test-corpus generator, benign workload generator
-evaluation/     experiment runner, results table and charts
+tools/          test-corpus generator, benign workload generator,
+                fetch_napierone.py (unsigned-S3 fetch of the real data set)
+evaluation/     live trial runner, attack matrix, labelled-dataset builder,
+                file-level classifier evaluation, report tables and charts
 dashboard/      Streamlit live view
-tests/          pytest unit tests
+tests/          pytest unit tests (114)
+datasets/       generated locally: napierone_sample/, labeled/ (git-ignored, not
+                redistributed - rebuild with the Dataset commands above)
 sandbox/        generated at runtime: protected/, .backup/, events.jsonl (git-ignored)
 ```
