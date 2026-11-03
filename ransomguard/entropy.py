@@ -52,6 +52,9 @@ MAGIC_SIGNATURES: dict[str, tuple[tuple[int, bytes], ...]] = {
     ".mov": ((4, b"ftyp"),),
     ".gz": ((0, b"\x1f\x8b"),),
     ".mp3": ((0, b"ID3"), (0, b"\xff\xfb")),
+    # RAR 4 and RAR 5 share the first 7 bytes; 7z has a 6-byte signature.
+    ".rar": ((0, b"\x52\x61\x72\x21\x1a\x07"),),
+    ".7z": ((0, b"\x37\x7a\xbc\xaf\x27\x1c"),),
     # Matroska / WebM share the EBML signature.
     ".mkv": ((0, b"\x1a\x45\xdf\xa3"),),
     ".webm": ((0, b"\x1a\x45\xdf\xa3"),),
@@ -352,6 +355,80 @@ def _mp3_structurally_ok(data: bytes, frames_to_check: int = 12) -> bool:
     return True
 
 
+def _rar_structurally_ok(data: bytes, headers_to_check: int = 8) -> bool:
+    """RAR 5 stores a CRC32 in front of every header; RAR 4 a CRC16. Walk the first few
+    headers and verify them - encrypting the body breaks the chain immediately."""
+    rar5 = b"\x52\x61\x72\x21\x1a\x07\x01\x00"
+    rar4 = b"\x52\x61\x72\x21\x1a\x07\x00"
+
+    if data[:8] == rar5:
+        pos, checked = 8, 0
+        while checked < headers_to_check and pos + 4 < len(data):
+            want = int.from_bytes(data[pos:pos + 4], "little")
+            val, used = _rar_vint(data, pos + 4)
+            if used == 0 or val <= 0:
+                return False
+            start, end = pos + 4, pos + 4 + used + val
+            if end > len(data):
+                return False
+            if zlib.crc32(data[start:end]) & 0xFFFFFFFF != want:
+                return False
+            pos, checked = end, checked + 1
+        return checked > 0
+
+    if data[:7] == rar4:
+        pos, checked = 7, 0
+        while checked < headers_to_check and pos + 7 <= len(data):
+            want = int.from_bytes(data[pos:pos + 2], "little")
+            hsize = int.from_bytes(data[pos + 5:pos + 7], "little")
+            if hsize < 7 or pos + hsize > len(data):
+                return False
+            if (zlib.crc32(data[pos + 2:pos + hsize]) & 0xFFFF) != want:
+                return False
+            flags = int.from_bytes(data[pos + 3:pos + 5], "little")
+            add = 0
+            if flags & 0x8000:
+                if pos + hsize + 4 > len(data):
+                    return False
+                add = int.from_bytes(data[pos + 7:pos + 11], "little")
+            pos, checked = pos + hsize + add, checked + 1
+        return checked > 0
+
+    return False
+
+
+def _rar_vint(data: bytes, pos: int) -> tuple[int, int]:
+    """RAR 5 variable int: 7 bits per byte, little-endian, high bit = continue."""
+    value, shift, used = 0, 0, 0
+    while pos + used < len(data) and used < 10:
+        b = data[pos + used]
+        value |= (b & 0x7F) << shift
+        used += 1
+        if not b & 0x80:
+            return value, used
+        shift += 7
+    return 0, 0
+
+
+def _sevenzip_structurally_ok(data: bytes) -> bool:
+    """7z keeps a CRC32 of its 20-byte start header, which itself holds the offset, size and
+    CRC32 of the next header. Both must check out and the next header must fit the file."""
+    if data[:6] != b"\x37\x7a\xbc\xaf\x27\x1c" or len(data) < 32:
+        return False
+    start = data[12:32]                                  # NextHeaderOffset/Size/CRC
+    if zlib.crc32(start) & 0xFFFFFFFF != int.from_bytes(data[8:12], "little"):
+        return False
+    nh_off = int.from_bytes(start[0:8], "little")
+    nh_size = int.from_bytes(start[8:16], "little")
+    nh_crc = int.from_bytes(start[16:20], "little")
+    begin, end = 32 + nh_off, 32 + nh_off + nh_size
+    if begin < 32 or end > len(data):
+        return False
+    if nh_size == 0:                                     # empty archive: nothing more to check
+        return True
+    return zlib.crc32(data[begin:end]) & 0xFFFFFFFF == nh_crc
+
+
 def structural_ok(path: Path, magic: bool | None) -> bool | None:
     """
     A deeper check than magic bytes: is the file a STRUCTURALLY valid instance of its type?
@@ -392,6 +469,10 @@ def structural_ok(path: Path, magic: bool | None) -> bool | None:
             return _mkv_structurally_ok(path.read_bytes())
         if ext == ".mp3":
             return _mp3_structurally_ok(path.read_bytes())
+        if ext == ".rar":
+            return _rar_structurally_ok(path.read_bytes())
+        if ext in (".7z", ".7zip"):
+            return _sevenzip_structurally_ok(path.read_bytes())
     except Exception:
         return False            # any parse error means the structure is broken
     return True                 # valid magic, no deeper check available -> trust it

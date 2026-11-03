@@ -16,6 +16,9 @@ import gzip
 import io
 import os
 import zipfile
+import zlib
+
+import pytest
 
 from ransomguard import config, entropy
 from ransomguard.baseline import BaselineEntry
@@ -167,3 +170,59 @@ def test_mp3_structural_valid_and_header_kept_detected(tmp_path):
     bad.write_bytes(container.make_header_kept(_mp3_bytes(), _key(), "b.mp3", keep=8))
     s = entropy.analyse_file(bad)
     assert s.structural_ok is False                          # frame-sync chain broken
+
+
+# ------------------------------------------------- archive structural checks (step 2)
+def _7z_bytes(payload: bytes = b"\x00" * 64) -> bytes:
+    """A 7z start header is self-describing: CRC32 of the 20-byte start header, which holds
+    the offset, size and CRC32 of the next header."""
+    next_header = bytes(range(32))
+    nh_off, nh_size = len(payload), len(next_header)
+    start = (nh_off.to_bytes(8, "little") + nh_size.to_bytes(8, "little")
+             + (zlib.crc32(next_header) & 0xFFFFFFFF).to_bytes(4, "little"))
+    start_crc = (zlib.crc32(start) & 0xFFFFFFFF).to_bytes(4, "little")
+    return b"\x37\x7a\xbc\xaf\x27\x1c" + b"\x00\x04" + start_crc + start + payload + next_header
+
+
+def _rar5_bytes(blocks: int = 3) -> bytes:
+    """RAR 5: every header is preceded by a CRC32 over (size-vint + header data)."""
+    out = b"\x52\x61\x72\x21\x1a\x07\x01\x00"
+    for _ in range(blocks):
+        body = b"\x73" + b"\x00" * 20
+        size_vint = bytes([len(body)])                 # < 128, so a single-byte vint
+        out += (zlib.crc32(size_vint + body) & 0xFFFFFFFF).to_bytes(4, "little")
+        out += size_vint + body
+    return out
+
+
+def _rar4_bytes(blocks: int = 3) -> bytes:
+    """RAR 4: each block starts with a CRC16 over the rest of its header."""
+    out = b"\x52\x61\x72\x21\x1a\x07\x00"
+    for _ in range(blocks):
+        rest = b"\x00" * 10
+        hsize = 7 + len(rest)
+        hdr = b"\x73" + (0).to_bytes(2, "little") + hsize.to_bytes(2, "little") + rest
+        out += (zlib.crc32(hdr) & 0xFFFF).to_bytes(2, "little") + hdr
+    return out
+
+
+@pytest.mark.parametrize("name,builder", [
+    ("a.7z", _7z_bytes), ("a.rar", _rar5_bytes), ("b.rar", _rar4_bytes),
+])
+def test_archive_structural_valid_and_header_kept_detected(tmp_path, name, builder):
+    good = tmp_path / name
+    good.write_bytes(builder())
+    s = entropy.analyse_file(good)
+    assert s.magic_ok is True and s.structural_ok is True
+
+    bad = tmp_path / ("hk_" + name)
+    bad.write_bytes(container.make_header_kept(builder(), _key(), name, keep=8))
+    s = entropy.analyse_file(bad)
+    assert s.magic_ok is True and s.structural_ok is False   # signature kept, CRCs broken
+
+
+def test_truncated_archives_are_rejected(tmp_path):
+    for name, builder in (("t.7z", _7z_bytes), ("t.rar", _rar5_bytes)):
+        p = tmp_path / name
+        p.write_bytes(builder()[:20])
+        assert entropy.analyse_file(p).structural_ok is False

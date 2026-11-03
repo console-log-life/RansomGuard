@@ -329,7 +329,15 @@ def main(argv: list[str] | None = None) -> int:
         "extension signals that do not exist in a single-file view), so the two numbers "
         "measure different things and must not be compared.")
     lines.append(
-        "2. **The benign archives are ours, not NapierOne's.** NapierOne's own ZIP/RAR/7ZIP/GZIP "
+        "2. **The RAR and 7Z structural checks were added after inspecting results**, like the "
+        "media ones before them: the first run on real archives showed RAR/7Z had no "
+        "structural check at all, so a header-kept archive was judged only on entropy - and "
+        "an archive is already high-entropy. They verify the RAR 4 CRC16 / RAR 5 CRC32 header "
+        "chain and the 7z start-header and next-header CRC32s. Because they were designed "
+        "after seeing a split, the seed-3031 and seed-1234 columns are the ones to trust for "
+        "generalisation, not seed 2025 alone.")
+    lines.append(
+        "3. **The benign archives are ours, not NapierOne's.** NapierOne's own ZIP/RAR/7ZIP/GZIP "
         "bundles are 520-625 MB, over the download cap, so the high-entropy benign hard "
         "negatives are ZIP and GZIP archives we create from the sampled NapierOne files. They "
         "are still genuine, valid archives - just produced locally rather than downloaded.")
