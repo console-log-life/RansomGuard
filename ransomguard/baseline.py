@@ -27,6 +27,10 @@ class BaselineEntry:
     sha256: str
     size: int
     ext: str
+    # Was the file a VALID instance of its type when we first saw it? Recorded so the
+    # structure_broken signal can fire on files that BECAME broken, and stay quiet about
+    # ones that were already damaged before we ever ran (truncated downloads, etc.).
+    structural_ok: bool | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -34,6 +38,7 @@ class BaselineEntry:
             "sha256": self.sha256,
             "size": self.size,
             "ext": self.ext,
+            "structural_ok": self.structural_ok,
         }
 
 
@@ -48,11 +53,13 @@ def sha256_file(path: Path | str, chunk: int = 1 << 20) -> str:
 
 def scan_file(path: Path) -> BaselineEntry:
     """Measure one file for the baseline (full-file hash, sampled entropy)."""
+    signals = entropy.analyse_file(path)
     return BaselineEntry(
-        entropy=entropy.file_entropy(path),
+        entropy=signals.entropy,
         sha256=sha256_file(path),
         size=path.stat().st_size,
         ext=path.suffix.lower(),
+        structural_ok=signals.structural_ok,
     )
 
 
@@ -95,6 +102,7 @@ def load_baseline(path: Path | None = None) -> dict[str, BaselineEntry]:
             sha256=value["sha256"],
             size=value["size"],
             ext=value["ext"],
+            structural_ok=value.get("structural_ok"),
         )
         for key, value in raw.items()
     }

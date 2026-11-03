@@ -98,7 +98,11 @@ def evaluate_signals(
     # .mp4 and its magic bytes are intact, but it no longer parses as one. That is evidence
     # in its own right - and the only signal available against header-kept encryption of an
     # already-compressed type, where neither magic_broken nor entropy_jump can fire.
-    elif current.structural_ok is False and current.magic_ok is True:
+    elif (current.structural_ok is False and current.magic_ok is True
+            and baseline.structural_ok is not False):
+        # ...but only if it parsed fine before. Some files are already damaged when we first
+        # see them (a truncated download, say); those must not look like an attack when
+        # nothing has touched them. This mirrors entropy_jump: we score the CHANGE.
         reasons.append(
             Reason("structure_broken", config.W_STRUCTURE_BROKEN, f"{current.ext} does not parse")
         )

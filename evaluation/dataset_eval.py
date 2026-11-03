@@ -19,6 +19,7 @@ Run:  python evaluation/build_dataset.py        # once, to create datasets/label
 from __future__ import annotations
 
 import csv
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,8 @@ class Scored:
 
 
 def _baseline_of(signals) -> BaselineEntry:
-    return BaselineEntry(entropy=signals.entropy, sha256="", size=signals.size, ext=signals.ext)
+    return BaselineEntry(entropy=signals.entropy, sha256="", size=signals.size,
+                         ext=signals.ext, structural_ok=signals.structural_ok)
 
 
 def analyse_all(rows: list[dict], multi_offset: bool, encoded: bool) -> list[Scored]:
@@ -88,6 +90,48 @@ def confusion(scored: list[Scored], threshold: float, key=lambda s: s.score) -> 
         elif s.label == 0 and pred == 0: tn += 1
         else: fn += 1
     return tp, fp, tn, fn
+
+
+REAL_ARCHIVE_TYPES = {"ZIP", "RAR", "7ZIP", "GZIP"}
+
+
+def wilson_ci(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for a proportion. Preferred over the normal approximation
+    because our rates sit near 0 and 1, where the normal interval leaves the [0,1] range."""
+    if n == 0:
+        return (0.0, 0.0)
+    p = successes / n
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return (max(0.0, centre - half), min(1.0, centre + half))
+
+
+def fpr_by_benign_group(test: list[Scored], threshold: float) -> list[str]:
+    """False-positive rate split by WHERE the benign file came from. Real archives
+    downloaded from NapierOne are the honest hard negatives; the zip/gzip variants we
+    generate ourselves are easier, so mixing them would flatter the result."""
+    groups: dict[str, list[Scored]] = {"real archive (NapierOne ZIP/RAR/7Z/GZIP)": [],
+                                       "our generated zip/gzip": [],
+                                       "other real originals": []}
+    for s in test:
+        if s.label != 0:
+            continue
+        if s.variant in ("benign_zip", "benign_gzip"):
+            groups["our generated zip/gzip"].append(s)
+        elif s.source_type in REAL_ARCHIVE_TYPES:
+            groups["real archive (NapierOne ZIP/RAR/7Z/GZIP)"].append(s)
+        else:
+            groups["other real originals"].append(s)
+
+    out = ["| benign group | n | false positives | FPR | 95% CI |", "|---|---|---|---|---|"]
+    for name, gs in groups.items():
+        if not gs:
+            continue
+        fp = sum(1 for s in gs if s.score >= threshold)
+        lo, hi = wilson_ci(fp, len(gs))
+        out.append(f"| {name} | {len(gs)} | {fp} | {fp/len(gs):.4f} | [{lo:.4f}, {hi:.4f}] |")
+    return out
 
 
 def metrics(tp: int, fp: int, tn: int, fn: int) -> dict[str, float]:
@@ -141,10 +185,13 @@ def roc_auc(scored: list[Scored], key=lambda s: s.score) -> tuple[list[float], l
 # --------------------------------------------------------------------- report
 def _md_metrics(name: str, m: dict[str, float], cm: tuple[int, int, int, int]) -> list[str]:
     tp, fp, tn, fn = cm
+    rec_lo, rec_hi = wilson_ci(tp, tp + fn)
+    fpr_lo, fpr_hi = wilson_ci(fp, fp + tn)
     return [
         f"**{name}**  precision={m['precision']:.3f} recall={m['recall']:.3f} "
         f"F1={m['f1']:.3f} FPR={m['fpr']:.3f} accuracy={m['accuracy']:.3f}",
         f"  confusion: TP={tp} FP={fp} TN={tn} FN={fn}",
+        f"  95% CI: recall [{rec_lo:.3f}, {rec_hi:.3f}]  FPR [{fpr_lo:.3f}, {fpr_hi:.3f}]",
     ]
 
 
@@ -293,6 +340,30 @@ def main(argv: list[str] | None = None) -> int:
         "pdf, jpg). Media types (mp3/mp4/mkv) have no cheap structural check, so a header-kept "
         "media file is trusted on its magic and evades - a known limitation that a real EDR "
         "would close with format-aware parsers or kernel file->PID attribution.*")
+
+    lines.append("")
+    lines.append("## False positives by benign source - FRESH split (test)")
+    lines.append("")
+    lines.append("Now that the heavy NapierOne bundles are included, the benign side "
+                 "contains REAL ZIP/RAR/7Z/GZIP archives, not only archives we generate "
+                 "ourselves. They are reported separately because a real archive is the "
+                 "harder negative: it is high-entropy and structurally valid.")
+    lines.append("")
+    lines += fpr_by_benign_group(fresh["test_new"], fresh["t_new"])
+
+    lines.append("")
+    lines.append("## Agreement across all three seeds (test)")
+    lines.append("")
+    lines.append("| seed | role | precision | recall | recall 95% CI | FPR | FPR 95% CI | F1 | AUC |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
+    for res, role in ((fresh, "fresh headline"), (val_res, "validation"), (old_res, "original")):
+        m = headline(res)
+        tp, fp, tn, fn = res["cm_new"]
+        rl, rh = wilson_ci(tp, tp + fn)
+        fl, fh = wilson_ci(fp, fp + tn)
+        lines.append(f"| {res['seed']} | {role} | {m['precision']:.3f} | {m['recall']:.3f} | "
+                     f"[{rl:.3f}, {rh:.3f}] | {m['fpr']:.4f} | [{fl:.4f}, {fh:.4f}] | "
+                     f"{m['f1']:.3f} | {res['roc_comb'][2]:.3f} |")
 
     lines.append("\n## header-kept recall per file type - FRESH split (test)\n")
     lines.append("The media structural checks (MP4/MKV/MP3) were added specifically for this "

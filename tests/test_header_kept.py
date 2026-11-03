@@ -221,6 +221,28 @@ def test_archive_structural_valid_and_header_kept_detected(tmp_path, name, build
     assert s.magic_ok is True and s.structural_ok is False   # signature kept, CRCs broken
 
 
+def test_structure_broken_only_fires_on_files_that_became_broken(tmp_path):
+    """A file that was ALREADY damaged when we first saw it (a truncated download) must not
+    score as an attack while nothing touches it - only a file that turns broken should."""
+    from ransomguard.baseline import BaselineEntry
+    from ransomguard.scorer import evaluate_signals
+
+    broken = tmp_path / "truncated.7z"
+    broken.write_bytes(_7z_bytes()[:20])
+    sig = entropy.analyse_file(broken)
+    assert sig.structural_ok is False
+
+    was_broken = BaselineEntry(entropy=sig.entropy, sha256="", size=sig.size, ext=sig.ext,
+                               structural_ok=False)
+    codes = [r.code for r in evaluate_signals(sig, was_broken, canary_touched=False)]
+    assert "structure_broken" not in codes
+
+    was_fine = BaselineEntry(entropy=sig.entropy, sha256="", size=sig.size, ext=sig.ext,
+                             structural_ok=True)
+    codes = [r.code for r in evaluate_signals(sig, was_fine, canary_touched=False)]
+    assert "structure_broken" in codes
+
+
 def test_truncated_archives_are_rejected(tmp_path):
     for name, builder in (("t.7z", _7z_bytes), ("t.rar", _rar5_bytes)):
         p = tmp_path / name

@@ -276,7 +276,9 @@ def main(argv: list[str] | None = None) -> int:
         benign_labels = ["benign-1"]
     else:
         # >= 10 attack trials across speeds and orders.
-        delays = [0.05, 0.1, 0.2, 0.3, 0.4]
+        # 10 speeds x 2 orders = 20 attack trials per corpus. The grid spans attacks that
+        # finish before a PID can be attributed (0.05 s/file) through to slow, quiet ones.
+        delays = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
         attack_matrix = [(order, d) for order in ("alphabetical", "random") for d in delays]
         benign_labels = ["benign-1", "benign-2", "benign-3"]
 
