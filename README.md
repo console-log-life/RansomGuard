@@ -374,8 +374,8 @@ produces a large entropy jump. The same is true on the mixed NapierOne corpus, w
 mode is caught by both detectors - a whole-attack view saturates, because one low-entropy
 text file anywhere in the folder is enough to raise the alarm. **The place header-kept
 actually differentiates is the per-file evaluation**, where each file is judged alone: see
-the Dataset section, where header-kept recall on MP3/MP4/MKV goes 0.000 -> 1.000 and on
-DOCX/XLSX 0.417/0.185 -> 1.000.
+the Dataset section, where header-kept recall on MP3/MP4 goes 0.000 -> 1.000, MKV
+0.000 -> 0.966, and DOCX/XLSX 0.417/0.185 -> 1.000.
 
 One honest residual: on the NapierOne corpus the `slow` cell with canaries on ends
 `no_kill` - at 1.5 s/file the attacker's write volume stays under the attribution rate, so
@@ -462,22 +462,24 @@ the test split never touched during tuning:
 
 | detector | precision | recall | F1 | FPR | AUC |
 |----------|-----------|--------|----|-----|-----|
-| **new** (structural gate + multi-offset + encoded + structure_broken) | **0.998** | **0.980** | **0.989** | 0.003 | **0.990** |
-| old (first-window entropy + magic only) | 0.997 | 0.894 | 0.943 | 0.003 | - |
+| **new** (structural gate + multi-offset + encoded + structure_broken) | **0.998** | **0.980** | **0.989** | 0.003 | **0.989** |
+| old (first-window entropy + magic only) | 0.997 | 0.893 | 0.942 | 0.003 | - |
 | entropy alone | 0.600 | 0.998 | 0.749 | 0.888 | 0.564 |
 
 The entropy-alone row is the point of the whole project: it catches nearly everything and
 is useless anyway, flagging 89 % of benign files. Results are on the **fresh** split (seed
 2025). Because the media structural checks were designed after looking at that split, a
 **second independent split (seed 3031)** is also reported and agrees - precision 0.997,
-recall 0.970, F1 0.983, AUC 0.984 - so the gain is not tuned to one split.
+recall 0.972, F1 0.984, AUC 0.985 - so the gain is not tuned to one split.
 
-Header-kept recall is **1.000 for 11 of the 12 file types**. The three the media checks
-were written for went from undetectable to perfect (MP3, MP4 0.000 -> 1.000; MKV
-0.000 -> 1.000), and scoring the structural finding directly lifted the compressed
-container types (DOCX 0.417 -> 1.000, XLSX 0.185 -> 1.000). TXT remains 0.778: plain text
-has no structure to check, so header-kept text is caught only when the encrypted remainder
-moves its entropy far enough.
+Header-kept recall is **1.000 for 10 of the 12 file types**. The three the media checks
+were written for went from undetectable to near-perfect (MP3 and MP4 0.000 -> 1.000, MKV
+0.000 -> 0.966), and scoring the structural finding directly lifted the compressed
+container types (DOCX 0.417 -> 1.000, XLSX 0.185 -> 1.000). The two that fall short are
+explainable: the remaining MKV misses are large files where the kept 10 % already satisfies
+the child-element walk, and TXT stays at 0.778 because plain text has no structure to
+check, so header-kept text is caught only when the encrypted remainder moves its entropy
+far enough.
 
 **Future work: MLRan.** A natural next step is a comparison against a machine-learning
 baseline trained on behavioural traces - e.g. the **MLRan** dataset of ransomware API-call
