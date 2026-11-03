@@ -57,8 +57,9 @@ cryptographically protected backup.
 | 7 | Streamlit dashboard | done |
 | 8 | threat model, NapierOne real dataset, file-level classifier evaluation | done |
 | 9 | header-kept attack + structural-validity gate, dual-corpus evaluation | done |
+| 10 | full 17-type NapierOne sample, RAR/7Z checks, 10871-sample evaluation | done |
 
-All 114 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
+All 119 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
 Python and also runs on Ubuntu. The one platform-specific area is process attribution -
 see **Known limitations** for the measured Windows behaviour and how it is handled.
 
@@ -175,7 +176,7 @@ the PNG charts. The raw JSON is git-ignored; regenerate it with the commands abo
 ### Dataset (real NapierOne files)
 
 ```bash
-python tools/fetch_napierone.py --count 40 --max-archive-mb 170   # -> datasets/napierone_sample/
+python tools/fetch_napierone.py --count 100 --max-archive-mb 650  # -> datasets/napierone_sample/
 python evaluation/build_dataset.py                                # -> datasets/labeled/ + labels.csv
 python evaluation/dataset_eval.py                                 # -> dataset_results.md + charts
 ```
@@ -183,26 +184,26 @@ python evaluation/dataset_eval.py                                 # -> dataset_r
 ### Tests
 
 ```bash
-python -m pytest tests -q        # 114 tests
+python -m pytest tests -q        # 119 tests
 ```
 
 ## Results: synthetic vs real NapierOne corpus
 
-Both corpora, 10 attack + 3 benign trials each, plus a 12-cell attack matrix each
+Both corpora, 20 attack + 3 benign trials each, plus a 12-cell attack matrix each
 (`evaluation/results/results.md`):
 
 | corpus | files | attacker killed | folder clean | detection | files encrypted | false positives | matrix clean | new catches vs old |
 |--------|-------|-----------------|--------------|-----------|-----------------|-----------------|--------------|--------------------|
-| synthetic | 16 | 8/10 | **10/10** | 1.59 s | 9.5 (59 %) | **0** | 12/12 | 2 |
-| **NapierOne (real)** | 204 | **10/10** | **10/10** | 2.28 s | 13.9 (**7 %**) | **0** | 12/12 | 0 |
+| synthetic | 16 | 16/20 | **20/20** | 2.04 s | 8.7 (54 %) | **0** | 12/12 | 2 |
+| **NapierOne (real)** | 204 | **20/20** | **20/20** | 2.36 s | 10.9 (**5 %**) | **0** | 12/12 | 0 |
 
 Reading it:
 
 - **On real files the detector does better, not worse.** With a realistic 204-file corpus
-  every attacker was attributed and killed (10/10) and only ~7 % of files were touched,
-  versus 59 % on the tiny 16-file synthetic set - a small corpus is simply consumed before
+  every attacker was attributed and killed (20/20) and only ~5 % of files were touched,
+  versus 54 % on the tiny 16-file synthetic set - a small corpus is simply consumed before
   attribution can finish, which is an artefact of the test size, not of the detector.
-- **Folder fully clean 10/10 on both**, verified by re-hashing every file against a snapshot
+- **Folder fully clean 20/20 on both**, verified by re-hashing every file against a snapshot
   taken *before* the attack (not by trusting what recovery reported). The monitor re-arms
   after each response and does a final sweep, so even a mis-attributed first wave ends clean.
 - **Zero false positives on both** during benign work (editing documents, copying photos,
@@ -242,11 +243,12 @@ detector**. That is why the score combines several signals.
               +--------------------+--------------------+
               |                    |                    |
          entropy.py            canary.py           baseline.py
-   entropy + chi-square,   canary files touched?  startup entropy +
-   magic bytes, multi-offset                      SHA-256 of every file
-   windows, base64/encoded
-   detection, STRUCTURAL
-   validity (zip/png/gz/pdf/jpg)
+   entropy + chi-square,   canary files touched?  startup entropy,
+   magic bytes, multi-offset                      SHA-256 and STRUCTURAL
+   windows, base64/encoded                        validity of every file
+   detection, STRUCTURAL                          (so we can tell a file that
+   validity (zip/png/gz/pdf/                       BECAME broken from one that
+   jpg/mp4/mkv/mp3/rar/7z)                         was already broken)
               |                    |                    |
               +--------------------+--------------------+
                                    v
@@ -322,9 +324,9 @@ reproduces the "old" detector for the before/after comparison):
   optimising it to compute each window's entropy once). Because analysis runs synchronously
   on every watchdog event, this extra per-event latency lets a fast attacker encrypt a
   few more files before the score crosses the threshold - it is one of the reasons the
-  slowest attacks are killed while the fastest finish first (currently 6/10 killed, mean
-  12.2/16 files encrypted; see `evaluation/results/results.md`).
-  No files are lost (recovery still restores 10/10 to a clean folder); it is a
+  slowest attacks are killed while the fastest finish first (currently 16/20 killed, mean
+  8.7/16 files encrypted; see `evaluation/results/results.md`).
+  No files are lost (recovery still restores 20/20 to a clean folder); it is a
   detection-latency cost of looking harder, and the sampling (windows, not whole files)
   keeps it bounded.
 - **Encoded-content detection.** A charset + entropy heuristic (`entropy.is_encoded`) flags
@@ -375,12 +377,13 @@ mode is caught by both detectors - a whole-attack view saturates, because one lo
 text file anywhere in the folder is enough to raise the alarm. **The place header-kept
 actually differentiates is the per-file evaluation**, where each file is judged alone: see
 the Dataset section, where header-kept recall on MP3/MP4 goes 0.000 -> 1.000, MKV
-0.000 -> 0.966, and DOCX/XLSX 0.417/0.185 -> 1.000.
+0.000 -> 0.985, DOCX/XLSX 0.417/0.185 -> 1.000, and the archive types (ZIP/RAR/7ZIP/GZIP)
+reach 1.000 once RAR and 7Z get structural checks of their own.
 
-One honest residual: on the NapierOne corpus the `slow` cell with canaries on ends
-`no_kill` - at 1.5 s/file the attacker's write volume stays under the attribution rate, so
-no PID is pinned. Recovery still restored all 64 affected files and the folder ended
-byte-for-byte clean; the kill simply had no confident target.
+Every cell on both corpora now also ends with the **correct process killed** (12/12).
+An earlier run showed the NapierOne `slow` cells as `no_kill`, but that was the harness:
+its window was a flat 40 s, shorter than a 1.5 s/file attack on a 60-file corpus, so the
+attack was still running when the trial was cut off. The window now scales with the corpus.
 
 > **Honest caveat.** This before/after gap is measured on a **text-only** corpus on
 > purpose. Every encrypted file begins with the simulator's container header (`RGSIM1`),
@@ -438,48 +441,67 @@ NapierOne authors; please cite them if you use it.
 
 **What we sample.** NapierOne stores one large ZIP *bundle* per file type rather than loose
 files, so the tool downloads the smallest bundle under a size cap and extracts a seeded
-random sample from it (skipping anything over 5 MB). With a 170 MB cap that gives **480
-files across 12 types** - JPG, PNG, MP3, MP4, MKV, PDF, DOCX, XLSX, TXT, CSV, JSON, HTML.
-The remaining types (ZIP, RAR, 7ZIP, GZIP, PPTX) have 303-625 MB bundles and are skipped by
-default; raise `--max-archive-mb` to include them.
+random sample from it (skipping anything over 5 MB). With a 650 MB cap that covers **all 17
+types**: **1553 files** - JPG, PNG, MP3, MP4, MKV, PDF, DOCX, XLSX, PPTX, TXT, CSV, JSON,
+HTML and, importantly, the already-compressed ZIP, RAR, 7ZIP and GZIP (their bundles are
+303-625 MB, which is why a smaller cap skips them). Each bundle is deleted straight after
+extraction, so the peak disk cost is one bundle plus the 1.2 GB sample.
 
 ```bash
 pip install -r requirements.txt                      # boto3 for the unsigned S3 access
-python tools/fetch_napierone.py --count 40 --max-archive-mb 170   # -> datasets/napierone_sample/
+python tools/fetch_napierone.py --count 100 --max-archive-mb 650  # -> datasets/napierone_sample/
 python evaluation/build_dataset.py                   # -> datasets/labeled/ + labels.csv
 python evaluation/dataset_eval.py                    # -> dataset_results.md + charts
 ```
 
 `build_dataset.py` turns each source file into 7 labelled variants - benign (original, ZIP,
 GZIP) and ransomware (full, intermittent, base64, header-kept) - split 30/70 tuning/test
-**by source file**, so no file's variants straddle the split. That is 3360 labelled samples
-from 480 originals.
+**by source file**, so no file's variants straddle the split. That is **10871 labelled
+samples from 1553 originals** (6212 ransomware / 4659 benign), about 8.4 GB on disk.
+
+Because the archive types are now included, the benign side contains **283 real
+ZIP/RAR/7Z/GZIP archives** as hard negatives, not only the 3106 zip/gzip archives we build
+ourselves. Those two groups are scored separately, since a real archive is the harder
+negative.
 
 ### File-level results (`evaluation/results/dataset_results.md`)
 
 Each sample is scored **on its own**, with the threshold tuned on the tuning split only and
 the test split never touched during tuning:
 
-| detector | precision | recall | F1 | FPR | AUC |
-|----------|-----------|--------|----|-----|-----|
-| **new** (structural gate + multi-offset + encoded + structure_broken) | **0.998** | **0.980** | **0.989** | 0.003 | **0.989** |
-| old (first-window entropy + magic only) | 0.997 | 0.893 | 0.942 | 0.003 | - |
-| entropy alone | 0.600 | 0.998 | 0.749 | 0.888 | 0.564 |
+| detector | precision | recall (95% CI) | F1 | FPR (95% CI) | AUC |
+|----------|-----------|-----------------|----|--------------|-----|
+| **new** (structural gate + multi-offset + encoded + structure_broken) | **1.000** | **0.976** [0.971, 0.980] | **0.988** | **0.0000** [0.0000, 0.0012] | **0.988** |
+| old (first-window entropy + magic only) | 1.000 | 0.911 [0.902, 0.919] | 0.953 | 0.0000 | - |
+| entropy alone | 0.594 | 1.000 | 0.745 | **0.912** | 0.543 |
 
-The entropy-alone row is the point of the whole project: it catches nearly everything and
-is useless anyway, flagging 89 % of benign files. Results are on the **fresh** split (seed
-2025). Because the media structural checks were designed after looking at that split, a
-**second independent split (seed 3031)** is also reported and agrees - precision 0.997,
-recall 0.972, F1 0.984, AUC 0.985 - so the gain is not tuned to one split.
+False positives split by where the benign file came from - **zero in every group**:
 
-Header-kept recall is **1.000 for 10 of the 12 file types**. The three the media checks
-were written for went from undetectable to near-perfect (MP3 and MP4 0.000 -> 1.000, MKV
-0.000 -> 0.966), and scoring the structural finding directly lifted the compressed
-container types (DOCX 0.417 -> 1.000, XLSX 0.185 -> 1.000). The two that fall short are
-explainable: the remaining MKV misses are large files where the kept 10 % already satisfies
-the child-element walk, and TXT stays at 0.778 because plain text has no structure to
-check, so header-kept text is caught only when the encrypted remainder moves its entropy
-far enough.
+| benign group | n | false positives | FPR | 95% CI |
+|---|---|---|---|---|
+| real archive (NapierOne ZIP/RAR/7Z/GZIP) | 199 | **0** | 0.0000 | [0.0000, 0.0189] |
+| our generated zip/gzip | 2134 | **0** | 0.0000 | [0.0000, 0.0018] |
+| other real originals | 868 | **0** | 0.0000 | [0.0000, 0.0044] |
+
+All three seeds agree, so the result is not an artefact of one split:
+
+| seed | role | precision | recall | FPR | F1 | AUC |
+|---|---|---|---|---|---|---|
+| 2025 | fresh headline | 1.000 | 0.976 | 0.0000 | 0.988 | 0.988 |
+| 3031 | validation | 1.000 | 0.978 | 0.0000 | 0.989 | 0.989 |
+| 1234 | original | 1.000 | 0.974 | 0.0000 | 0.987 | 0.987 |
+
+The entropy-alone row is the point of the whole project: it catches everything and is
+useless anyway, flagging **91 %** of benign files. The media checks, and later the RAR/7Z
+ones, were each designed after inspecting a split - which is exactly why seeds 3031 and
+1234 are reported alongside the headline seed 2025.
+
+Header-kept recall is **1.000 for 14 of the 17 file types**, including every archive type
+(ZIP, RAR, 7ZIP, GZIP, PPTX) now that RAR and 7Z have structural checks. The three left
+are explainable rather than mysterious: **MKV 0.985** (a few large files where the kept
+10 % already satisfies the child-element walk), **TXT 0.912** and **CSV 0.688** - plain
+text and CSV have no structure to verify, so header-kept text is caught only when the
+encrypted remainder moves its entropy far enough, and a short CSV often does not.
 
 **Future work: MLRan.** A natural next step is a comparison against a machine-learning
 baseline trained on behavioural traces - e.g. the **MLRan** dataset of ransomware API-call
@@ -533,7 +555,9 @@ work.
   shorten the gap, the process sampler now wakes immediately on each sandbox write (a
   "kick") and samples faster (0.1 s) while the sandbox is hot. Measured effect over the 10
   trials: detection latency and mid-speed files-encrypted dropped slightly, but the **kill
-  rate did not reliably improve (≈7–8/10, run-to-run noise)**. The honest reason, confirmed
+  rate did not reliably improve on the tiny synthetic corpus (16/20, run-to-run noise)**.
+  On the realistic 204-file corpus the kill rate is **20/20**, because a larger folder
+  gives attribution the time it needs. The honest reason, confirmed
   by a micro-benchmark: per-process `io_counters` on Windows updates too coarsely (~1 s) to
   attribute a sub-second attack, and a 0.05 s/file attack (~0.8 s total) simply *exits*
   before any user-space suspend can land. Faster sampling cannot beat that, because the
@@ -559,7 +583,7 @@ tools/          test-corpus generator, benign workload generator,
 evaluation/     live trial runner, attack matrix, labelled-dataset builder,
                 file-level classifier evaluation, report tables and charts
 dashboard/      Streamlit live view
-tests/          pytest unit tests (114)
+tests/          pytest unit tests (119)
 datasets/       generated locally: napierone_sample/, labeled/ (git-ignored, not
                 redistributed - rebuild with the Dataset commands above)
 sandbox/        generated at runtime: protected/, .backup/, events.jsonl (git-ignored)
