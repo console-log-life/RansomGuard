@@ -2,8 +2,8 @@
 
 | corpus | files | attacker killed | folder clean | detection | files encrypted | false positives | matrix clean | new catches vs old |
 |---|---|---|---|---|---|---|---|---|
-| synthetic | 16 | 8/10 | 10/10 | 1.59 s | 9.5 (59%) | 0 | 10/10 | 2 |
-| NapierOne (real) | 204 | 10/10 | 10/10 | 2.28 s | 13.9 (7%) | 0 | 10/10 | 0 |
+| synthetic | 16 | 8/10 | 10/10 | 1.59 s | 9.5 (59%) | 0 | 12/12 | 2 |
+| NapierOne (real) | 204 | 10/10 | 10/10 | 2.28 s | 13.9 (7%) | 0 | 12/12 | 0 |
 
 *'new catches vs old' counts attack-matrix cells the upgraded detector catches that the original would have missed. It is 0 on NapierOne because real files carry magic bytes the old detector already used; the gap only shows on the text-only corpus, which is the hard case.*
 
@@ -50,22 +50,24 @@
 
 | mode | canaries | detected (new)? | would OLD detector catch? | detection (s) | encrypted | recovered | folder clean | clean pre-sweep | correct kill |
 |------|----------|-----------------|---------------------------|---------------|-----------|-----------|--------------|-----------------|--------------|
-| full | on | yes | yes | 1.313 | 3 | 3 | yes | yes | yes |
-| slow | on | yes | yes | 2.084 | 2 | 2 | yes | yes | yes |
+| full | on | yes | yes | 1.724 | 3 | 3 | yes | yes | yes |
+| slow | on | yes | yes | 2.553 | 2 | 2 | yes | yes | yes |
 | no-rename | on | yes | yes | 1.339 | 3 | 3 | yes | yes | yes |
-| base64 | on | yes | yes | 1.305 | 3 | 3 | yes | yes | yes |
-| intermittent | on | yes | yes | 1.73 | 4 | 4 | yes | yes | yes |
-| full | off | yes | yes | 2.251 | 5 | 5 | yes | yes | yes |
-| slow | off | yes | yes | 2.422 | 2 | 2 | yes | yes | yes |
-| no-rename | off | yes | yes | 1.424 | 3 | 3 | yes | yes | yes |
-| base64 | off | yes | **NO (new catch)** | 1.869 | 3 | 3 | yes | yes | yes |
-| intermittent | off | yes | **NO (new catch)** | 1.804 | 4 | 4 | yes | yes | yes |
+| base64 | on | yes | yes | 1.533 | 3 | 3 | yes | yes | yes |
+| intermittent | on | yes | yes | 1.604 | 3 | 3 | yes | yes | yes |
+| header-kept | on | yes | yes | 1.691 | 3 | 3 | yes | yes | yes |
+| full | off | yes | yes | 2.769 | 6 | 6 | yes | yes | yes |
+| slow | off | yes | yes | 2.445 | 2 | 2 | yes | yes | yes |
+| no-rename | off | yes | yes | 1.626 | 3 | 3 | yes | yes | yes |
+| base64 | off | yes | **NO (new catch)** | 2.229 | 4 | 4 | yes | yes | yes |
+| intermittent | off | yes | **NO (new catch)** | 2.16 | 4 | 4 | yes | yes | yes |
+| header-kept | off | yes | yes | 1.481 | 3 | 3 | yes | yes | yes |
 
-**Before/after:** 2 of 10 attack cells are caught by the new detector but would have slipped past the original entropy/magic/canary detector
+**Before/after:** 2 of 12 attack cells are caught by the new detector but would have slipped past the original entropy/magic/canary detector
 - base64 (canaries off)
 - intermittent (canaries off)
 
-**Recovery:** folder fully clean in 10/10 cells (ground truth).
+**Recovery:** folder fully clean in 12/12 cells (ground truth).
 
 # NapierOne corpus (real files)
 
@@ -109,17 +111,19 @@
 
 | mode | canaries | detected (new)? | would OLD detector catch? | detection (s) | encrypted | recovered | folder clean | clean pre-sweep | correct kill |
 |------|----------|-----------------|---------------------------|---------------|-----------|-----------|--------------|-----------------|--------------|
-| full | on | yes | yes | 3.007 | 6 | 6 | yes | yes | yes |
-| slow | on | yes | yes | 21.202 | 14 | 14 | yes | yes | yes |
-| no-rename | on | yes | yes | 3.433 | 7 | 7 | yes | yes | yes |
-| base64 | on | yes | yes | 4.724 | 6 | 6 | yes | yes | yes |
-| intermittent | on | yes | yes | 3.016 | 6 | 6 | yes | yes | yes |
-| full | off | yes | yes | 2.462 | 5 | 5 | yes | yes | yes |
-| slow | off | yes | yes | 6.848 | 5 | 5 | yes | yes | yes |
-| no-rename | off | yes | yes | 2.871 | 6 | 6 | yes | yes | yes |
-| base64 | off | yes | yes | 2.92 | 6 | 6 | yes | yes | yes |
-| intermittent | off | yes | yes | 3.123 | 6 | 6 | yes | yes | yes |
+| full | on | yes | yes | 3.196 | 6 | 6 | yes | yes | yes |
+| slow | on | yes | yes | - | 64 | 64 | yes | no | no_kill |
+| no-rename | on | yes | yes | 3.116 | 6 | 6 | yes | yes | yes |
+| base64 | on | yes | yes | 3.063 | 6 | 6 | yes | yes | yes |
+| intermittent | on | yes | yes | 3.278 | 7 | 7 | yes | yes | yes |
+| header-kept | on | yes | yes | 3.424 | 7 | 7 | yes | yes | yes |
+| full | off | yes | yes | 2.692 | 5 | 5 | yes | yes | yes |
+| slow | off | yes | yes | 6.842 | 5 | 5 | yes | yes | yes |
+| no-rename | off | yes | yes | 2.971 | 6 | 6 | yes | yes | yes |
+| base64 | off | yes | yes | 2.619 | 5 | 5 | yes | yes | yes |
+| intermittent | off | yes | yes | 2.814 | 6 | 6 | yes | yes | yes |
+| header-kept | off | yes | yes | 2.96 | 6 | 6 | yes | yes | yes |
 
-**Before/after:** 0 of 10 attack cells are caught by the new detector but would have slipped past the original entropy/magic/canary detector
+**Before/after:** 0 of 12 attack cells are caught by the new detector but would have slipped past the original entropy/magic/canary detector
 
-**Recovery:** folder fully clean in 10/10 cells (ground truth).
+**Recovery:** folder fully clean in 12/12 cells (ground truth).

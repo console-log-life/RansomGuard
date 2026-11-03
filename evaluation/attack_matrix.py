@@ -67,13 +67,14 @@ def _text_corpus() -> None:
     )
 
 
-MODES = ["full", "slow", "no-rename", "base64", "intermittent"]
+MODES = ["full", "slow", "no-rename", "base64", "intermittent", "header-kept"]
 # Per-file delay for the LIVE operational run. A 6-file text attack at ~0.1 s finishes in
 # under a second - before a PID can be attributed - so almost every cell showed no_kill.
 # These slower rates give the attribution/kill path time to fire (slow stays slowest). The
 # efficacy columns (detected? / would-old-catch?) come from the delay-0 offline replay and
 # are unaffected by this.
-MODE_DELAY = {"full": 0.5, "slow": 1.5, "no-rename": 0.5, "base64": 0.5, "intermittent": 0.5}
+MODE_DELAY = {"full": 0.5, "slow": 1.5, "no-rename": 0.5, "base64": 0.5,
+              "intermittent": 0.5, "header-kept": 0.5}
 
 
 @dataclass
@@ -175,6 +176,12 @@ def _operational(mode: str, canaries_on: bool) -> dict:
     monitor = _start_monitor()
     clean = _snapshot_hashes()
 
+    # The window must be long enough for the attack itself to finish, otherwise we would be
+    # measuring the harness's patience rather than the detector. 'slow' (1.5 s/file) on the
+    # 60-file NapierOne corpus needs ~90 s, well past the flat 40 s the synthetic corpus used.
+    n_files = sum(1 for f in config.PROTECTED_DIR.rglob("*") if f.is_file())
+    sim_timeout = min(300.0, max(40.0, MODE_DELAY[mode] * n_files * 1.2 + 25.0))
+
     if config.SIM_PID_FILE.exists():
         config.SIM_PID_FILE.unlink()
     sim_start = time.time()
@@ -192,7 +199,7 @@ def _operational(mode: str, canaries_on: bool) -> dict:
         except (OSError, ValueError):
             time.sleep(0.05)
     try:
-        sim.wait(timeout=40)
+        sim.wait(timeout=sim_timeout)
     except subprocess.TimeoutExpired:
         pass
     time.sleep(2.0)                       # let in-attack responses finish

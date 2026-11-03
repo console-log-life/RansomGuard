@@ -44,18 +44,6 @@ Within scope, RansomGuard's job is narrow and measurable: notice the encryption 
 stop the responsible user-owned process, and restore every file from a hash-verified,
 cryptographically protected backup.
 
-## Two-minute demo
-
-```bash
-pip install -r requirements.txt
-python tools/make_test_files.py --clean        # build a safe test corpus in ./sandbox
-python demo_entropy.py                          # why entropy alone is not enough
-python -m ransomguard.monitor --enforce --duration 30   # terminal 1: the detector
-python -m simulator.fake_ransomware --delay 0.3         # terminal 2: the attack
-# watch terminal 1: ALERT -> culprit -> suspend -> recovery -> kill, folder restored
-python -m pytest tests -q                       # 97 tests
-```
-
 ## Status
 
 | Phase | Contents | State |
@@ -70,14 +58,17 @@ python -m pytest tests -q                       # 97 tests
 | 8 | threat model, NapierOne real dataset, file-level classifier evaluation | done |
 | 9 | header-kept attack + structural-validity gate, dual-corpus evaluation | done |
 
-All 111 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
+All 114 unit tests pass. Developed and demoed on Windows 11 (Python 3.15); the code is pure
 Python and also runs on Ubuntu. The one platform-specific area is process attribution -
 see **Known limitations** for the measured Windows behaviour and how it is handled.
 
-## Setup
 
-Target environment is Ubuntu with Python 3.10+; the code is pure Python and also runs on
-Windows (process suspension in phase 4 is the only platform-specific part).
+## How to run
+
+### Setup
+
+Python 3.10+. Developed and demoed on Windows 11; the code is pure Python and also runs on
+Ubuntu. Process suspension is the only platform-specific part.
 
 ```bash
 python3 -m venv .venv
@@ -85,62 +76,29 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Run (phase 1)
+### The demo (three terminals)
+
+First build the safe corpus and show why entropy alone is not a detector:
 
 ```bash
-# 1. build the safe test corpus in ./sandbox/protected
-python tools/make_test_files.py --clean
-
-# 2. the demo to show first: entropy of text vs jpg vs zip vs AES-encrypted text
-python demo_entropy.py
-
-# 3. unit tests
-python -m pytest tests -q
+python tools/make_test_files.py --clean   # safe corpus in ./sandbox/protected
+python demo_entropy.py                    # text vs jpg vs zip vs AES-encrypted text
 ```
 
-## Run (phase 3: live monitor, log-only)
+Then run the live pipeline:
 
 ```bash
-# terminal 1 - start the detector (rebuilds baseline + canaries, then watches)
-python -m ransomguard.monitor --path ./sandbox/protected
-#   or auto-stop after N seconds for a scripted demo:
-python -m ransomguard.monitor --duration 20
+# terminal 1 - the enforcing monitor (builds baseline + canaries, then watches)
+python -m ransomguard.monitor --enforce
 
-# terminal 2 - launch the safe simulator against it
-python -m simulator.fake_ransomware --delay 0.12 --order alphabetical
+# terminal 2 - the live dashboard (optional, opens in your browser)
+streamlit run dashboard/app.py
 
-# afterwards: inspect the structured log
-python -c "import json;[print(l.strip()) for l in open('sandbox/events.jsonl')]"
-python -m simulator.undo        # restore the corpus
+# terminal 3 - the attack; note the PID it prints
+python -m simulator.fake_ransomware --delay 0.3 --order alphabetical
 ```
 
-In phase 3 the monitor only *logs* the alert; it does not kill or restore yet. With
-alphabetical order the attacker meets the `aaa_` canary first, so the alert fires on the
-very first encrypted file (score 85 = canary 60 + low-chi 10 + suspicious-ext 15).
-
-## Run (phase 4: enforcing - suspend + kill)
-
-```bash
-# terminal 1 - enforcing monitor (suspends then kills the attributed process)
-python -m ransomguard.monitor --enforce --duration 25
-
-# terminal 2 - the attacker; note the PID it prints
-python -m simulator.fake_ransomware --delay 0.12 --order alphabetical
-```
-
-The monitor logs `ALERT -> culprit(pid) -> suspend -> kill`. The killed PID matches the
-PID the simulator printed, which is how we verify the right process was stopped. A typical
-run stops the attack after ~10 of 16 files (corpus + canaries); the gap is the time to
-attribute a PID, and phase 5 restores those encrypted files from the backup.
-
-## Run (phase 5: enforce + recover - the full pipeline)
-
-```bash
-python -m ransomguard.monitor --enforce --duration 25
-python -m simulator.fake_ransomware --delay 0.25 --order alphabetical
-```
-
-The monitor now logs the complete response, in this deliberate order:
+Terminal 1 logs the complete response, in this deliberate order:
 
 ```
 ALERT -> culprit(pid) -> suspend -> recovery(affected/restored/failed) -> kill
@@ -151,89 +109,92 @@ files), **recover while it is frozen** (restore every changed/deleted/`.locked` 
 the hash-verified backup and delete the artifacts), and **kill last**. A clean run ends
 with the folder byte-for-byte identical to its clean state - every restored file is
 re-hashed against the manifest, so `restored` is a verified count, and `.locked` files
-left = 0.
+left = 0. If an attack is so fast it finishes before a PID can be attributed, the monitor
+still runs recovery (logged as `enforce_unattributed -> recovery`) and restores 100% of
+the files - the kill simply has nothing left to stop.
 
-Backup details: at startup the folder is snapshotted to `./sandbox/.backup` with a
-SHA-256 manifest. A background thread folds **benign** edits into the backup every few
-seconds (same name, magic bytes intact, no high-entropy jump), but never while an alert is
-active - so ransomware output can never overwrite a good backup. Recovery restores from
-this backup, not from the simulator's key, so it works against real ransomware too.
-
-If an attack is so fast it finishes before a PID can be attributed, the monitor still runs
-recovery (logged as `enforce_unattributed -> recovery`) and restores 100% of the files -
-the kill simply has nothing left to stop.
-
-## Run (phase 6: evaluation - the numbers for the report)
+Useful variations:
 
 ```bash
-# trials on the generated corpus (>=10 attack trials + benign false-positive runs)
-python -m evaluation.run_experiment --corpus synthetic
-python -m evaluation.attack_matrix  --corpus synthetic
-
-# the same on ~200 REAL files sampled from NapierOne (see "Dataset" below)
-python -m evaluation.run_experiment --corpus napierone
-python -m evaluation.attack_matrix  --corpus napierone
-
-# render the combined report (synthetic + NapierOne side by side) + charts
-python -m evaluation.report
+python -m ransomguard.monitor                     # log-only: no suspend, no kill
+python -m ransomguard.monitor --enforce --duration 30   # auto-stop, for a scripted demo
+python -m simulator.fake_ransomware --mode base64       # full | no-rename | base64 |
+                                                        # intermittent | header-kept
+python -m simulator.undo                          # reverse the simulator's own damage
 ```
 
-Run them **one at a time** - they all drive the same `./sandbox`, so a concurrent run would
-corrupt another's measurements.
-
-Each **attack trial** builds a fresh corpus, starts the enforcing monitor, runs the
-simulator at a given speed/order, and records four metrics: detection time (attack start ->
-process suspended), files encrypted before the attacker was stopped, files restored
-(hash-verified), and failures. Each **benign trial** runs `tools/benign_workload.py`
-(editing documents, copying photos, zipping, writing a large gzip) under the same monitor
-and counts false positives - the target is 0. The benign workload deliberately does not
-touch the canaries, exactly as a real user would not.
-
-Outputs land in `evaluation/results/`: `results.json` (raw), `results.md` (the table), and
-three PNG charts (`encrypted_vs_restored.png`, `detection_time.png`,
-`recovery_vs_false_positives.png`). The results directory is git-ignored; regenerate it
-with the two commands above.
-
-## Run (phase 7: live dashboard)
-
-```bash
-# terminal 1 - enforcing monitor
-python -m ransomguard.monitor --enforce
-
-# terminal 2 - the Streamlit dashboard (opens in your browser)
-streamlit run dashboard/app.py
-
-# terminal 3 - launch the attack and watch the dashboard react
-python -m simulator.fake_ransomware --delay 0.3 --order alphabetical
-```
+Backup details: at startup the folder is snapshotted to `./sandbox/.backup` with a SHA-256
+manifest. A background thread folds **benign** edits into the backup every few seconds
+(same name, magic bytes intact, no high-entropy jump), but never while an alert is active -
+so ransomware output can never overwrite a good backup. Recovery restores from this backup,
+not from the simulator's key, so it works against real ransomware too.
 
 The dashboard reads only `./sandbox/events.jsonl` - it never touches the sandbox or the
 detector, so it is safe to leave running. It shows the live suspicion score vs. the
-threshold, the alert and the response taken (culprit PID, suspend, kill), how many files
-were encrypted and how many were restored, the canary status, a score-over-time chart and a
-scrolling feed of file events with the signals that fired. It auto-refreshes every 2 s.
+threshold, the alert and the response taken (culprit PID, suspend, kill), files encrypted
+and restored, canary status, a score-over-time chart and a scrolling feed of file events
+with the signals that fired, refreshing every 2 s. Everything is scoped to the **current
+run** (events after the latest `startup`), so an earlier demo never bleeds into the chart.
 
-Everything on the dashboard is scoped to the **current run** (the events after the latest
-`startup`), so an earlier demo never bleeds into the chart or the counts. The score is
-decayed to "now" with the same half-life as the scorer, so it falls back after the attack
-stops; files encrypted/restored are summed over all recovery sweeps in the run; canaries
-are counted by unique decoy touched; and the status flips to **ATTACK STOPPED - folder
-restored** once the attacker is killed and recovery has run.
-
-> **Reset the demo.** The log is append-only, so start each demo from a clean slate:
+> **Reset between demos.** The log is append-only, so start each demo from a clean slate:
 > `python tools/make_test_files.py --clean` rebuilds the corpus, and the next
 > `python -m ransomguard.monitor --enforce` writes a fresh `startup` the dashboard scopes
 > to. (To also clear history, delete `./sandbox/events.jsonl` before starting.)
 
-### Results: synthetic vs real NapierOne corpus
+### Evaluation
 
-Both corpora, 10 attack + 3 benign trials each, plus a 10-cell attack matrix each
+Run these **one at a time** - they all drive the same `./sandbox`, so a concurrent run
+would corrupt another's measurements.
+
+```bash
+# live trials on the generated corpus (10 attack trials + 3 benign false-positive runs)
+python -m evaluation.run_experiment --corpus synthetic
+python -m evaluation.attack_matrix  --corpus synthetic
+
+# the same on ~200 REAL files sampled from NapierOne (see Dataset below)
+python -m evaluation.run_experiment --corpus napierone
+python -m evaluation.attack_matrix  --corpus napierone
+
+# render the combined report (both corpora side by side) + charts
+python -m evaluation.report
+```
+
+Each **attack trial** builds a fresh corpus, starts the enforcing monitor, runs the
+simulator at a given speed/order, and records detection time (attack start -> process
+suspended), files encrypted before the attacker was stopped, files restored
+(hash-verified), and failures. Each **benign trial** runs `tools/benign_workload.py`
+(editing documents, copying photos, zipping, writing a large gzip) under the same monitor
+and counts false positives - the target is 0; it deliberately does not touch the canaries,
+exactly as a real user would not. The **attack matrix** crosses every attack mode with
+canaries on/off and also replays each one offline against the original detector, which is
+where the old-vs-new comparison comes from.
+
+Outputs land in `evaluation/results/`: raw JSON per corpus, `results.md` (all tables) and
+the PNG charts. The raw JSON is git-ignored; regenerate it with the commands above.
+
+### Dataset (real NapierOne files)
+
+```bash
+python tools/fetch_napierone.py --count 40 --max-archive-mb 170   # -> datasets/napierone_sample/
+python evaluation/build_dataset.py                                # -> datasets/labeled/ + labels.csv
+python evaluation/dataset_eval.py                                 # -> dataset_results.md + charts
+```
+
+### Tests
+
+```bash
+python -m pytest tests -q        # 114 tests
+```
+
+## Results: synthetic vs real NapierOne corpus
+
+Both corpora, 10 attack + 3 benign trials each, plus a 12-cell attack matrix each
 (`evaluation/results/results.md`):
 
 | corpus | files | attacker killed | folder clean | detection | files encrypted | false positives | matrix clean | new catches vs old |
 |--------|-------|-----------------|--------------|-----------|-----------------|-----------------|--------------|--------------------|
-| synthetic | 16 | 8/10 | **10/10** | 1.59 s | 9.5 (59 %) | **0** | 10/10 | 2 |
-| **NapierOne (real)** | 204 | **10/10** | **10/10** | 2.28 s | 13.9 (**7 %**) | **0** | 10/10 | 0 |
+| synthetic | 16 | 8/10 | **10/10** | 1.59 s | 9.5 (59 %) | **0** | 12/12 | 2 |
+| **NapierOne (real)** | 204 | **10/10** | **10/10** | 2.28 s | 13.9 (**7 %**) | **0** | 12/12 | 0 |
 
 Reading it:
 
@@ -253,7 +214,7 @@ Reading it:
 
 Numbers vary slightly run to run (live timing); regenerate with the commands above.
 
-Example output of `demo_entropy.py` (phase 1):
+Example output of `demo_entropy.py`:
 
 ```
 file                              size  entropy     chi-square    magic        verdict
@@ -381,7 +342,8 @@ python -m simulator.fake_ransomware --mode base64 --delay 0.15
 python -m simulator.undo                      # reverses every mode
 
 # ablation + attack-matrix (attack modes x canaries on/off, old-vs-new detector):
-python -m evaluation.attack_matrix
+python -m evaluation.attack_matrix --corpus synthetic
+python -m evaluation.attack_matrix --corpus napierone
 python -m evaluation.report                    # writes results.md + charts
 ```
 
@@ -398,12 +360,27 @@ the comparison):
 | no-rename | caught | caught (entropy jump) |
 | **base64** | **caught** (encoded signal) | **MISSED** |
 | **intermittent** | **caught** (multi-offset) | **MISSED** |
+| header-kept | caught | caught (entropy jump) |
 
 So the two upgrades newly catch exactly the two attacks designed to evade the original
 entropy/magic signals; `no-rename` was already caught by magic/entropy, and with canaries
 on every mode is caught. Recovery restored the folder to a byte-for-byte clean state in all
-10 matrix cells (ground truth), and `clean pre-sweep` shows several cells needed the final
-stop() recovery sweep to get there.
+12 matrix cells on **both** corpora (ground truth), and `clean pre-sweep` shows several
+cells needed the final stop() recovery sweep to get there.
+
+`header-kept` is caught by the old detector too, and that is expected: this corpus is
+text, whose baseline entropy is ~4.5, so encrypting the body past the kept header still
+produces a large entropy jump. The same is true on the mixed NapierOne corpus, where every
+mode is caught by both detectors - a whole-attack view saturates, because one low-entropy
+text file anywhere in the folder is enough to raise the alarm. **The place header-kept
+actually differentiates is the per-file evaluation**, where each file is judged alone: see
+the Dataset section, where header-kept recall on MP3/MP4/MKV goes 0.000 -> 1.000 and on
+DOCX/XLSX 0.417/0.185 -> 1.000.
+
+One honest residual: on the NapierOne corpus the `slow` cell with canaries on ends
+`no_kill` - at 1.5 s/file the attacker's write volume stays under the attribution rate, so
+no PID is pinned. Recovery still restored all 64 affected files and the folder ended
+byte-for-byte clean; the kill simply had no confident target.
 
 > **Honest caveat.** This before/after gap is measured on a **text-only** corpus on
 > purpose. Every encrypted file begins with the simulator's container header (`RGSIM1`),
@@ -478,6 +455,30 @@ GZIP) and ransomware (full, intermittent, base64, header-kept) - split 30/70 tun
 **by source file**, so no file's variants straddle the split. That is 3360 labelled samples
 from 480 originals.
 
+### File-level results (`evaluation/results/dataset_results.md`)
+
+Each sample is scored **on its own**, with the threshold tuned on the tuning split only and
+the test split never touched during tuning:
+
+| detector | precision | recall | F1 | FPR | AUC |
+|----------|-----------|--------|----|-----|-----|
+| **new** (structural gate + multi-offset + encoded + structure_broken) | **0.998** | **0.980** | **0.989** | 0.003 | **0.990** |
+| old (first-window entropy + magic only) | 0.997 | 0.894 | 0.943 | 0.003 | - |
+| entropy alone | 0.600 | 0.998 | 0.749 | 0.888 | 0.564 |
+
+The entropy-alone row is the point of the whole project: it catches nearly everything and
+is useless anyway, flagging 89 % of benign files. Results are on the **fresh** split (seed
+2025). Because the media structural checks were designed after looking at that split, a
+**second independent split (seed 3031)** is also reported and agrees - precision 0.997,
+recall 0.970, F1 0.983, AUC 0.984 - so the gain is not tuned to one split.
+
+Header-kept recall is **1.000 for 11 of the 12 file types**. The three the media checks
+were written for went from undetectable to perfect (MP3, MP4 0.000 -> 1.000; MKV
+0.000 -> 1.000), and scoring the structural finding directly lifted the compressed
+container types (DOCX 0.417 -> 1.000, XLSX 0.185 -> 1.000). TXT remains 0.778: plain text
+has no structure to check, so header-kept text is caught only when the encrypted remainder
+moves its entropy far enough.
+
 **Future work: MLRan.** A natural next step is a comparison against a machine-learning
 baseline trained on behavioural traces - e.g. the **MLRan** dataset of ransomware API-call
 and registry behaviour. That would test a different detection axis (process behaviour
@@ -543,7 +544,7 @@ work.
 - The simulator mimics file behaviour only. Real ransomware also kills services, clears
   shadow copies and spreads laterally; none of that is implemented, by design.
 - Detection is reactive, so some files are always lost before the process is stopped. The
-  evaluation in phase 6 measures exactly how many.
+  evaluation measures exactly how many.
 
 ## Layout
 
